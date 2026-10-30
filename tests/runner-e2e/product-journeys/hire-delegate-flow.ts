@@ -142,7 +142,7 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
       await page.reload();
       await expect(page).toHaveURL(url => url.origin === api.origin
         && [second!.id, second!.identifier].some(id => url.pathname === `/${context.company.issuePrefix}/issues/${id}`));
-      await expect(page.getByText(second!.title, { exact: true }).first()).toBeVisible();
+      await expect(page.getByTestId("issue-detail-header").getByRole("heading", { name: second!.title, exact: true })).toBeVisible();
       break;
     }
   }
