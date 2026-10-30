@@ -35,13 +35,15 @@ export function observedHireResources<A extends Row, T extends Row>(scope: HireS
       && run.companyId === scope.companyId && hireRunIssueId(run) === scope.chatId));
   const agents = state.agents.filter(agent => authored(agent, ["agent.hire_created", "agent.created"]));
   const tasks = state.tasks.filter(task => authored(task, ["issue.created", "issue.child_created"]));
-  if (agents.some(agent => agent.companyId !== scope.companyId || agent.reportsTo !== scope.leadId)
-    || tasks.some(task => task.companyId !== scope.companyId || task.projectId !== scope.projectId)) {
-    throw new JourneyError("failed", "hire_resource_scope_mismatch");
-  }
-  // Retain unexpected native-created resources for cleanup. They cannot satisfy the oracle.
-  return { agents, tasks, hires: agents.filter(agent => agent.name === names.hire),
-    expectedTasks: tasks.filter(task => [names.checklist, names.review].includes(task.title)) };
+  const ownable = (row: Row, name: unknown) => row.companyId === scope.companyId && typeof row.id === "string" && row.id
+    && typeof name === "string" && Boolean(name);
+  const ownedAgents = agents.filter(agent => ownable(agent, agent.name)), ownedTasks = tasks.filter(task => ownable(task, task.title));
+  // Persist proven same-company creations before grading their manager/project.
+  // Foreign or malformed rows are never owned, and still make the journey fail.
+  return { agents: ownedAgents, tasks: ownedTasks, hires: ownedAgents.filter(agent => agent.name === names.hire),
+    expectedTasks: ownedTasks.filter(task => [names.checklist, names.review].includes(task.title)),
+    scopeMismatch: agents.some(agent => !ownable(agent, agent.name) || agent.reportsTo !== scope.leadId)
+      || tasks.some(task => !ownable(task, task.title) || task.projectId !== scope.projectId) };
 }
 export function assertHireBinding(scope: HireScope, agents: Row[], hiredId?: string) {
   const names = hireDelegateNames(scope.campaignId);

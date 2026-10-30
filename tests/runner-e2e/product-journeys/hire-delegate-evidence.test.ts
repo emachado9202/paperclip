@@ -54,7 +54,8 @@ describe("deployment hiring qualification", () => {
     const f = fixture(), extra = { ...f.task, id: "extra", title: `Unexpected ${scope.campaignId}` };
     const observed = observedHireResources(scope, { ...f.state, tasks: [...f.state.tasks, extra], activity: [...f.state.activity, f.event("issue.created", extra.id)] });
     expect(observed.tasks).toHaveLength(2); expect(observed.expectedTasks).toEqual([f.task]);
-    expect(() => observedHireResources(scope, { ...f.state, tasks: [{ ...f.task, projectId: "other" }] })).toThrow();
+    const mismatch = observedHireResources(scope, { ...f.state, tasks: [{ ...f.task, projectId: "other" }] });
+    expect(mismatch.tasks).toHaveLength(1); expect(mismatch.scopeMismatch).toBe(true);
   });
   it("binds lead and worker runs to their exact tasks, provider, model and environment", () => {
     const f = fixture(); expect(() => assertHireRuns(scope, f.agent.id, [f.task], [f.leadRun, f.taskRun])).not.toThrow();

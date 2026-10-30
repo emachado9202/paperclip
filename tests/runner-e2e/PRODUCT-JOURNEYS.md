@@ -49,6 +49,10 @@ uncertainties. The journey does not change company hiring policy or instance
 features. The provider must own and clean up the hired agent, both child tasks,
 the chat, and the project, including unexpected campaign-owned children after
 failure. A new deployment must qualify the journey before scheduled admission.
+Observation retries are limited to typed transient GET transport failures within
+the existing deadline. Ownership callbacks and grading failures are never
+retried. Audited same-company children are recorded before manager/project
+checks fail; foreign or malformed rows remain unowned and fail the journey.
 
 Supported acquisitions are managed self-hosted (`local`), registered existing
 Cloud (`local` or `daytona` when present), and new Cloud. New Cloud must start

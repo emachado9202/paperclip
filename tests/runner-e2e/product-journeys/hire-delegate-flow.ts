@@ -4,6 +4,7 @@ import path from "node:path";
 import { expect } from "@playwright/test";
 import { sendChatMessage, readChatOutputDocument, type ChatIssue, type ChatRun } from "../chat-flow.js";
 import { assertChatHire, mutableIssueSnapshot } from "../chat-hardening.js";
+import { ConnectionFailure } from "../connection-config.js";
 import { assertHireAuditCoverage, assertHireBinding, assertHireDocument, assertHireRuns, hireDelegateNames, hireRunIssueId, observedHireResources, type HireScope } from "./hire-delegate-evidence.js";
 import { JourneyError, type JourneyContext, type JourneyEvidence, type TargetSession } from "./types.js";
 
@@ -12,6 +13,7 @@ type Agent = Parameters<typeof assertChatHire>[0]["agents"][number] & Row;
 type Task = ChatIssue & Row;
 type Run = ChatRun & Row;
 interface Options { deadlineAt: number; directory: string; capture(id: string, label: string, file: string): Promise<void> }
+class HireReadTransportError extends Error {}
 
 /** The same native hiring/document oracles used by classic Agent Chat, on an attached deployment. */
 export async function hireDelegateReuse(context: JourneyContext, session: TargetSession, campaignId: string, evidence: JourneyEvidence, options: Options) {
@@ -40,13 +42,25 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
   let scope: HireScope | undefined, hiredId: string | undefined;
   const known = new Set<string>();
   const taskNames = [names.checklist, names.review];
+  const readObserved = async <T>(route: string): Promise<T> => {
+    try { return await api.get<T>(route); }
+    catch (error) {
+      // Only the sanitized GET transport contract is retryable. In particular,
+      // ownership hooks may mutate state and must never be replayed on error.
+      if (error instanceof ConnectionFailure && (error.message === "api_request_failed"
+        || /^api_status_(408|429|502|503|504)$/.test(error.message))) {
+        throw new HireReadTransportError("hire_observation_transport_unavailable");
+      }
+      throw error;
+    }
+  };
   const readRuns = async (issueId: string) => {
-    const summaries = await api.get<Row[]>(`/api/issues/${issueId}/runs`);
+    const summaries = await readObserved<Row[]>(`/api/issues/${issueId}/runs`);
     if (!Array.isArray(summaries) || summaries.length > 5) throw new JourneyError("failed", "hire_run_limit_mismatch");
-    return Promise.all(summaries.map(row => api.get<Run>(`/api/heartbeat-runs/${row.runId}`)));
+    return Promise.all(summaries.map(row => readObserved<Run>(`/api/heartbeat-runs/${row.runId}`)));
   };
   const observe = async () => {
-    const chat = await api.get<Row | null>(chatPath);
+    const chat = await readObserved<Row | null>(chatPath);
     if (!chat) return undefined;
     if (chat.companyId !== context.company.id || chat.assigneeAgentId !== agent.id
       || chat.conversationAgentId !== agent.id || chat.conversationUserId !== context.user.id || chat.createdByUserId !== context.user.id) throw new JourneyError("failed", "hire_chat_scope_mismatch");
@@ -55,8 +69,8 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
     if (chat.id !== scope.chatId) throw new JourneyError("failed", "hire_chat_replaced");
     if (!known.has(chat.id)) { await session.own({ kind: "issue", name: chat.title, id: chat.id, journeyId: "hire-delegate-reuse" }); known.add(chat.id); }
     const [leadRuns, agents, tasks, activity] = await Promise.all([readRuns(chat.id),
-      api.get<Agent[]>(`/api/companies/${context.company.id}/agents`), api.get<Task[]>(`/api/companies/${context.company.id}/issues`),
-      api.get<Row[]>(`/api/companies/${context.company.id}/activity?agentId=${agent.id}&limit=500`)]);
+      readObserved<Agent[]>(`/api/companies/${context.company.id}/agents`), readObserved<Task[]>(`/api/companies/${context.company.id}/issues`),
+      readObserved<Row[]>(`/api/companies/${context.company.id}/activity?agentId=${agent.id}&limit=500`)]);
     assertHireAuditCoverage(activity, leadRuns);
     const owned = observedHireResources(scope, { agents, tasks, activity, leadRuns });
     for (const row of [...owned.agents.map(agent => ({ id: agent.id, kind: "agent" as const, resourceName: agent.name })),
@@ -66,6 +80,7 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
         await session.own({ kind: row.kind, name: row.resourceName, id: row.id, journeyId: "hire-delegate-reuse" }); known.add(row.id);
       }
     }
+    if (owned.scopeMismatch) throw new JourneyError("failed", "hire_resource_scope_mismatch");
     if (owned.agents.length) hiredId = assertHireBinding(scope, owned.agents, hiredId).id;
     const runs = [...leadRuns, ...(await Promise.all(owned.tasks.map(task => readRuns(task.id)))).flat()];
     assertHireRuns(scope, hiredId, owned.tasks, runs);
@@ -76,9 +91,13 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
   };
   const waitForIdle = async (count: number) => {
     while (Date.now() < options.deadlineAt) {
-      const state = await observe();
-      if (state && state.runs.length === count && state.runs.every(run => run.status === "succeeded")
-        && state.chat.status === "in_review" && state.chat.conversationState === "waiting") return state;
+      try {
+        const state = await observe();
+        if (state && state.runs.length === count && state.runs.every(run => run.status === "succeeded")
+          && state.chat.status === "in_review" && state.chat.conversationState === "waiting") return state;
+      } catch (error) {
+        if (!(error instanceof HireReadTransportError)) throw error;
+      }
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
     throw new JourneyError("failed", "hire_chat_not_completed");
