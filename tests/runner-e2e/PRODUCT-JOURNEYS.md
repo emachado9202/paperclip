@@ -31,11 +31,24 @@ never start a server or depend on a tenant filesystem.
 | `protected-actions` | Native agent; four work runs; authenticated reachable review-service fixture | Approve one action and decline another on separate owned tasks; verify zero calls before either decision, one after approval, zero after decline and a truthful saved explanation |
 | `create-skill-studio` | Native agent with skill-write permission; one work run | Create a uniquely named company skill, open its activity card, edit in Studio, reload and verify task-card readback |
 | `stop-redirect` | Native agent; three work runs; qualified Docker oracle | Download a verified checkpoint, Stop an active revision, require native cancellation acknowledgement, submit a new direction once and verify completion without original-run activity |
+| `hire-delegate-reuse` | Native agent with scoped hiring permission; Agent Chat enabled; direct hiring policy; five work runs | Hire one teammate, delegate a saved checklist, reuse the same teammate for a saved review, verify native run and revision authorship, preserve the original, and reopen the lead's saved result link |
 | `cloud-onboarding` | Signed-in admitted Cloud account; fresh workspace; qualified bounded provider route | Create workspace in the portal, connect API key and native Codex agent in the wizard, complete a task, download and independently check its artifact |
 
 The shared Studio helper waits for the original saved file body before typing.
 An editor control can mount before the file query completes; editing that empty
 draft can otherwise lose the original content when the file arrives.
+
+The hiring journey uses the existing Agent Chat prompts and native hiring oracle.
+It gives each disposable project, agent, and task a campaign name. The first
+turn only hires. The target provider can then verify the native creation audit
+and prepare that exact teammate's budget before the next turn delegates work.
+The checklist and review each require one successful child run and a current
+document revision authored by that run. The lead uses three runs, for five
+work runs in total. Setup probes and unpriced usage remain separate accounting
+uncertainties. The journey does not change company hiring policy or instance
+features. The provider must own and clean up the hired agent, both child tasks,
+the chat, and the project, including unexpected campaign-owned children after
+failure. A new deployment must qualify the journey before scheduled admission.
 
 Supported acquisitions are managed self-hosted (`local`), registered existing
 Cloud (`local` or `daytona` when present), and new Cloud. New Cloud must start
