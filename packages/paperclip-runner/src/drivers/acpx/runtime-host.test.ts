@@ -1429,8 +1429,6 @@ describe("ACPX runtime host", () => {
     };
     await expect(AcpxRuntimeHost.open(options, dependencies)).rejects.toThrow("runtime executable digest mismatch");
     expect(openRuntime).not.toHaveBeenCalled();
-    // The next launch must acquire the same lifetime lease, not wait on a
-    // failed digest check that never started a provider.
     const host = await AcpxRuntimeHost.open(options, fixture.dependencies({ openRuntime }));
     expect(openRuntime).toHaveBeenCalledOnce();
     await host.close({ reason: "verified after failed command admission" });

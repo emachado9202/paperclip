@@ -663,7 +663,6 @@ export async function verifyQualifiedAcpxInstallation(
   return qualifyAcpxInstallation(profile, resolvePackageJson, "eager");
 }
 
-/** Launch preparation retains metadata; openCommand must admit the native bytes. */
 export async function prepareQualifiedClaudeInstallationForLaunch(
   profile: QualifiedAcpxProfile,
   resolvePackageJson: AcpxPackageJsonResolver = defaultPackageJsonResolver,
@@ -1132,9 +1131,6 @@ async function verifyQualifiedRuntimeExecutable(input: {
     basename(unresolvedExecutablePath),
   );
   if (input.admission === "claude-launch") {
-    // Preserve the preparation-to-launch identity check without reading the
-    // native executable twice. The final descriptor opener below still hashes
-    // every byte against the build-owned qualification before it can execute.
     const metadata = await lstat(executablePath, { bigint: true });
     if (metadata.isSymbolicLink() || !metadata.isFile() || metadata.size < 1n ||
       metadata.size > BigInt(MAX_ACPX_RUNTIME_EXECUTABLE_BYTES) ||

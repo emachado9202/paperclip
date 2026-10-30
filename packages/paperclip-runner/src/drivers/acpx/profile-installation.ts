@@ -8,7 +8,6 @@ import { resolveQualifiedAcpxProfile, type QualifiedAcpxAgent, type QualifiedAcp
 import { verifyPiInstallation } from "./pi-installation.js";
 import { prepareQualifiedClaudeInstallationForLaunch, verifyQualifiedAcpxInstallation, type VerifiedAcpxInstallation } from "./installation-integrity.js";
 
-/** Only the launch path may defer Claude's native digest to its command lease. */
 export async function prepareAcpxProfileInstallationForLaunch(profile: QualifiedAcpxProfile, candidateAdmission?: AcpxCandidateStartupAdmission): Promise<VerifiedAcpxInstallation> {
   if (profile.agent !== "claude") return verifyAcpxProfileInstallation(profile, candidateAdmission);
   assertAcpxExecutionAdmission(profile, candidateAdmission);
