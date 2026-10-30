@@ -11,7 +11,7 @@ import { resolvePiThinkingLevel, type PiThinkingLevel } from "./pi-thinking.js";
 import { preparedHarnessHome, preconfiguredHomeEnvironment, usesPreconfiguredHome } from "../preconfigured-home.js";
 import { dirname, join } from "node:path";
 import { bindAcpxAgentFiles } from "./agent-files-binding.js";
-import { assertAcpxProfileEnvironment, assertAcpxProfileWorkspace, classifyAcpxProfileError, verifyAcpxProfileInstallation } from "./profile-installation.js";
+import { assertAcpxProfileEnvironment, assertAcpxProfileWorkspace, classifyAcpxProfileError, prepareAcpxProfileInstallationForLaunch } from "./profile-installation.js";
 import { createAcpxRuntimeSkillLease } from "./runtime-skill-lease.js";
 import { stageManagedGrokCredential } from "./grok-credentials.js";
 import { stageManagedAntigravityCredential } from "./antigravity-credentials.js";
@@ -417,7 +417,7 @@ export class AcpxRuntimeHost {
       () =>
         dependencies.verifyInstallation
           ? dependencies.verifyInstallation(profile)
-          : verifyAcpxProfileInstallation(profile, options.candidateAdmission),
+          : prepareAcpxProfileInstallationForLaunch(profile, options.candidateAdmission),
       dependencies.retainAdmissionCleanup,
     ).catch(error => { throw recordAcpxAdmissionFailure(error, "installation"); });
     if (installation.commandDigest !== profile.commandDigest) {

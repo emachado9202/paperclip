@@ -614,12 +614,21 @@ interface VerifiedAcpxCommandIdentity {
   changedNanoseconds: string;
 }
 
-interface VerifiedAcpxRuntimeExecutable {
+interface AcpxRuntimeExecutableLocation {
   path: string;
   digest: string;
-  identity: VerifiedAcpxCommandIdentity;
   environmentVariable: "CLAUDE_CODE_EXECUTABLE" | "CODEX_PATH" | "PAPERCLIP_GROK_VERIFIED_EXECUTABLE";
 }
+
+type AcpxRuntimeExecutable = AcpxRuntimeExecutableLocation & (
+  | { verification: "digest"; identity: VerifiedAcpxCommandIdentity }
+  | { verification: "pending-digest"; identity: VerifiedAcpxCommandIdentity }
+);
+
+type VerifiedAcpxRuntimeExecutable = AcpxRuntimeExecutableLocation & {
+  verification: "digest";
+  identity: VerifiedAcpxCommandIdentity;
+};
 
 interface AcpxPackageMetadata {
   version?: string;
@@ -650,6 +659,25 @@ const GUARDED_MODULE_SNAPSHOT_BOOTSTRAP = snapshotBootstrap("module", true);
 export async function verifyQualifiedAcpxInstallation(
   profile: QualifiedAcpxProfile,
   resolvePackageJson: AcpxPackageJsonResolver = defaultPackageJsonResolver,
+): Promise<VerifiedAcpxInstallation> {
+  return qualifyAcpxInstallation(profile, resolvePackageJson, "eager");
+}
+
+/** Launch preparation retains metadata; openCommand must admit the native bytes. */
+export async function prepareQualifiedClaudeInstallationForLaunch(
+  profile: QualifiedAcpxProfile,
+  resolvePackageJson: AcpxPackageJsonResolver = defaultPackageJsonResolver,
+): Promise<VerifiedAcpxInstallation> {
+  if (profile.agent !== "claude") {
+    throw new Error("Deferred runtime admission requires the Claude profile");
+  }
+  return qualifyAcpxInstallation(profile, resolvePackageJson, "claude-launch");
+}
+
+async function qualifyAcpxInstallation(
+  profile: QualifiedAcpxProfile,
+  resolvePackageJson: AcpxPackageJsonResolver,
+  admission: "eager" | "claude-launch",
 ): Promise<VerifiedAcpxInstallation> {
   assertAcpxProfileReleased(profile.agent);
   // Keep the selected package authority available when its bundled provider
@@ -725,7 +753,7 @@ export async function verifyQualifiedAcpxInstallation(
   let runtimePackageJsonPath: string | null = null;
   let runtimePackageFormat: AcpxCommandFormat | null = null;
   let runtimePackage: AcpxPackageMetadata | null = null;
-  let runtimeExecutable: VerifiedAcpxRuntimeExecutable | null = null;
+  let runtimeExecutable: AcpxRuntimeExecutable | null = null;
   if (builtin) {
     runtimeExecutable = await verifyProvisionedGrokExecutable();
   } else if (profile.agentRuntimePackage !== null) {
@@ -750,6 +778,7 @@ export async function verifyQualifiedAcpxInstallation(
       runtimePackage,
       runtimePackageJsonPath,
       resolvePackageJson,
+      admission,
     });
   } else if (profile.agentRuntimeVersion !== null) {
     throw new Error("Qualified ACPX runtime version omitted its package");
@@ -1017,7 +1046,7 @@ export async function verifyProvisionedGrokExecutable(executablePath = GROK_PRER
   if (!existsSync(executablePath)) throw new Error(`Grok Build 1.0.13 prerequisite missing: provision ${GROK_PREREQUISITE_PATH} in the execution environment`);
   const verified = await openVerifiedRuntimeExecutable(executablePath, `sha256:${digest}`, "grok");
   await verified.handle.close();
-  return { path: executablePath, digest: `sha256:${digest}`, identity: verified.identity,
+  return { path: executablePath, digest: `sha256:${digest}`, verification: "digest", identity: verified.identity,
     environmentVariable: "PAPERCLIP_GROK_VERIFIED_EXECUTABLE" };
 }
 
@@ -1026,7 +1055,8 @@ async function verifyQualifiedRuntimeExecutable(input: {
   runtimePackage: AcpxPackageMetadata;
   runtimePackageJsonPath: string;
   resolvePackageJson: AcpxPackageJsonResolver;
-}): Promise<VerifiedAcpxRuntimeExecutable | null> {
+  admission: "eager" | "claude-launch";
+}): Promise<AcpxRuntimeExecutable | null> {
   const qualification =
     input.profile.agent === "claude"
       ? process.platform === "darwin" && (process.arch === "arm64" || process.arch === "x64")
@@ -1101,6 +1131,24 @@ async function verifyQualifiedRuntimeExecutable(input: {
     executableDirectory,
     basename(unresolvedExecutablePath),
   );
+  if (input.admission === "claude-launch") {
+    // Preserve the preparation-to-launch identity check without reading the
+    // native executable twice. The final descriptor opener below still hashes
+    // every byte against the build-owned qualification before it can execute.
+    const metadata = await lstat(executablePath, { bigint: true });
+    if (metadata.isSymbolicLink() || !metadata.isFile() || metadata.size < 1n ||
+      metadata.size > BigInt(MAX_ACPX_RUNTIME_EXECUTABLE_BYTES) ||
+      (metadata.mode & 0o111n) === 0n) {
+      throw new Error(`ACPX ${input.profile.agent} runtime executable must be a bounded real executable file`);
+    }
+    return {
+      path: executablePath,
+      digest: qualification.executableDigest,
+      verification: "pending-digest",
+      identity: fileIdentity(metadata),
+      environmentVariable: qualification.environmentVariable,
+    };
+  }
   const verified = await openVerifiedRuntimeExecutable(
     executablePath,
     qualification.executableDigest,
@@ -1110,6 +1158,7 @@ async function verifyQualifiedRuntimeExecutable(input: {
   return {
     path: executablePath,
     digest: qualification.executableDigest,
+    verification: "digest",
     identity: verified.identity,
     environmentVariable: qualification.environmentVariable,
   };

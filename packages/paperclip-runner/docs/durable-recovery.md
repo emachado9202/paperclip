@@ -98,6 +98,15 @@ digest, and refuse the rest. A profile identity does not establish hosted
 harness qualification. [`rules/acpx-profile-identity.mdc`](../../../rules/acpx-profile-identity.mdc)
 summarizes these practices for contributors.
 
+Claude launch preparation checks the package graph, command digest, native
+executable metadata, and file identity. It defers the native executable digest
+until `openCommand` opens the execution descriptor. That opener reads the entire
+executable against its build-owned digest and checks the file identity before
+returning a command lease. Each launch therefore hashes the native executable
+once. Standalone installation verification still checks its digest eagerly.
+Corrupt native content can fail later in launch admission, after local sandbox
+or credential preparation; the provider cannot execute before that check passes.
+
 ## External controller checkpoints
 
 The optional controller persistence callback stores recovery control state, not

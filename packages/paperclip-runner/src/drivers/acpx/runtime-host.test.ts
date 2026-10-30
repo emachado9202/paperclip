@@ -1412,6 +1412,30 @@ describe("ACPX runtime host", () => {
     expect(fixture.commandClose).toHaveBeenCalledOnce();
   });
 
+  it("releases Claude's provider lifetime when final command verification fails", async () => {
+    const fixture = await hostFixture();
+    const openRuntime = vi.fn(async () => runtimePort({
+      getStatus: async () => ({ models: { currentModelId: "claude-sonnet-5" } }),
+    }));
+    const dependencies = fixture.dependencies({ openRuntime });
+    const verify = dependencies.verifyInstallation!;
+    dependencies.verifyInstallation = async (profile) => ({
+      ...await verify(profile),
+      openCommand: async () => { throw new Error("runtime executable digest mismatch"); },
+    });
+    const options = {
+      ...fixture.options, agent: "claude" as const, model: "claude-sonnet-5",
+      permissionMode: "approve-all" as const,
+    };
+    await expect(AcpxRuntimeHost.open(options, dependencies)).rejects.toThrow("runtime executable digest mismatch");
+    expect(openRuntime).not.toHaveBeenCalled();
+    // The next launch must acquire the same lifetime lease, not wait on a
+    // failed digest check that never started a provider.
+    const host = await AcpxRuntimeHost.open(options, fixture.dependencies({ openRuntime }));
+    expect(openRuntime).toHaveBeenCalledOnce();
+    await host.close({ reason: "verified after failed command admission" });
+  });
+
   it("cleans credentials and command leases when provider open fails", async () => {
     const fixture = await hostFixture();
     let authPath = "";

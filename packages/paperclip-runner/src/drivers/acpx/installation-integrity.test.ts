@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
+import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
 import { fork, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import {
   chmod,
+  copyFile,
   link,
   mkdir,
   mkdtemp,
@@ -37,6 +39,7 @@ import {
   snapshotDescriptorResolution,
   verifiedExecutableOpenFlags,
   verifyQualifiedAcpxInstallation,
+  prepareQualifiedClaudeInstallationForLaunch,
   probeAcpxClaudeInstallation,
   type VerifiedAcpxProviderLifetime,
 } from "./installation-integrity.js";
@@ -68,6 +71,52 @@ afterEach(async () => {
 });
 
 describe("ACPX installation integrity", () => {
+  it("defers Claude's native digest only until its command lease opens", () => withLinuxX64TestPlatform(async () => {
+    const fixture = await claudeLaunchFixture();
+    await expect(verifyQualifiedAcpxInstallation(fixture.profile, fixture.resolve)).rejects.toThrow("digest mismatch");
+    const prepared = await prepareQualifiedClaudeInstallationForLaunch(fixture.profile, fixture.resolve);
+    expect(prepared.commandDigest).toBe(fixture.profile.commandDigest);
+    await expect(prepared.openCommand()).rejects.toThrow("runtime executable digest mismatch");
+    await writeFile(fixture.dependencyPackage, JSON.stringify({ version: "unqualified" }));
+    await expect(prepareQualifiedClaudeInstallationForLaunch(fixture.profile, fixture.resolve))
+      .rejects.toThrow("dependency package version mismatch");
+  }));
+
+  it("rejects native symlink substitution after Claude launch preparation", () => withLinuxX64TestPlatform(async () => {
+    const fixture = await claudeLaunchFixture();
+    const prepared = await prepareQualifiedClaudeInstallationForLaunch(fixture.profile, fixture.resolve);
+    await rename(fixture.executablePath, `${fixture.executablePath}.original`);
+    await symlink(`${fixture.executablePath}.original`, fixture.executablePath);
+    await expect(prepared.openCommand()).rejects.toThrow("runtime executable must be a real regular file");
+  }));
+
+  it("rejects non-executable native metadata during Claude launch preparation", () => withLinuxX64TestPlatform(async () => {
+    const fixture = await claudeLaunchFixture();
+    await chmod(fixture.executablePath, 0o644);
+    await expect(prepareQualifiedClaudeInstallationForLaunch(fixture.profile, fixture.resolve))
+      .rejects.toThrow("bounded real executable file");
+  }));
+
+  it("does not expose deferred native admission for another provider", async () => {
+    await expect(prepareQualifiedClaudeInstallationForLaunch(resolveQualifiedAcpxProfile("codex", "gpt-5.6-sol")))
+      .rejects.toThrow("requires the Claude profile");
+  });
+
+  it.runIf(["linux", "darwin"].includes(process.platform) && ["arm64", "x64"].includes(process.arch))(
+    "rejects replacement with identical qualified native bytes after launch preparation", async () => {
+      const fixture = await claudeLaunchFixture(process.platform, process.arch);
+      const require = createRequire(import.meta.url);
+      const bridgeRequire = createRequire(require.resolve("@agentclientprotocol/claude-agent-acp/package.json"));
+      const runtimeRequire = createRequire(bridgeRequire.resolve("@anthropic-ai/claude-agent-sdk"));
+      const nativePackage = runtimeRequire.resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/package.json`);
+      await copyFile(join(dirname(nativePackage), "claude"), fixture.executablePath, constants.COPYFILE_FICLONE);
+      const prepared = await prepareQualifiedClaudeInstallationForLaunch(fixture.profile, fixture.resolve);
+      await rename(fixture.executablePath, `${fixture.executablePath}.original`);
+      await copyFile(`${fixture.executablePath}.original`, fixture.executablePath, constants.COPYFILE_FICLONE);
+      await expect(prepared.openCommand()).rejects.toThrow("runtime executable identity changed after verification");
+    }, 30_000,
+  );
+
   it.each([["linux", "x64"], ["linux", "arm64"], ["darwin", "arm64"], ["darwin", "x64"]] as const)(
     "retains Claude executable admission for a published bundle on %s %s", async (os, cpu) => {
       const parent = await realpath(await mkdtemp(join(tmpdir(), "paperclip-claude-npm-admission-")));
@@ -761,11 +810,13 @@ describe("ACPX installation integrity", () => {
     );
   });
 
-  it.runIf(["linux", "darwin"].includes(process.platform) && ["arm64", "x64"].includes(process.arch))(
+  it.runIf(["linux", "darwin"].includes(process.platform) && ["arm64", "x64"].includes(process.arch)).each([
+    verifyQualifiedAcpxInstallation, prepareQualifiedClaudeInstallationForLaunch,
+  ])(
     "resolves and pins the installed Claude ACP dependency graph",
-    async () => {
+    async (prepare) => {
       const profile = resolveQualifiedAcpxProfile("claude", "claude-sonnet-5");
-      const installation = await verifyQualifiedAcpxInstallation(profile);
+      const installation = await prepare(profile);
       expect(installation.agentServerPackageJsonPath).toContain(
         "/@agentclientprotocol/claude-agent-acp/package.json",
       );
@@ -2271,6 +2322,44 @@ async function waitUntilAsync(
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
   }
   throw new Error("Timed out waiting for subprocess state");
+}
+
+async function claudeLaunchFixture(os = "linux", cpu = "x64") {
+  const fixture = await installationFixture();
+  const platformName = `@anthropic-ai/claude-agent-sdk-${os}-${cpu}`;
+  const nativeDirectory = join(fixture.root, "native-runtime");
+  const dependencyDirectory = join(fixture.root, "client-sdk");
+  const zodDirectory = join(fixture.root, "zod");
+  await Promise.all([nativeDirectory, dependencyDirectory, zodDirectory].map(path => mkdir(path)));
+  const executablePath = join(nativeDirectory, "claude");
+  const dependencyPackage = join(dependencyDirectory, "package.json");
+  await Promise.all([
+    writeFile(fixture.serverPackageJsonPath, JSON.stringify({ version: "0.73.0", bin: "bin/server.js", dependencies: {
+      "@agentclientprotocol/sdk": "1.4.0", "@anthropic-ai/claude-agent-sdk": "0.3.257", zod: "^4.0.0",
+    } })),
+    writeFile(fixture.runtimePackageJsonPath, JSON.stringify({ version: "0.3.286", optionalDependencies: { [platformName]: "0.3.286" } })),
+    writeFile(join(nativeDirectory, "package.json"), JSON.stringify({ version: "0.3.286" })),
+    writeFile(dependencyPackage, JSON.stringify({ version: "1.4.0" })),
+    writeFile(join(zodDirectory, "package.json"), JSON.stringify({ version: "4.4.3" })),
+    writeFile(executablePath, "unqualified executable", { mode: 0o755 }),
+  ]);
+  const paths = new Map([
+    ["@agentclientprotocol/claude-agent-acp", fixture.serverPackageJsonPath],
+    ["@anthropic-ai/claude-agent-sdk", fixture.runtimePackageJsonPath],
+    [platformName, join(nativeDirectory, "package.json")],
+    ["@agentclientprotocol/sdk", dependencyPackage],
+    ["zod", join(zodDirectory, "package.json")],
+  ]);
+  return {
+    profile: { ...resolveQualifiedAcpxProfile("claude", "claude-sonnet-5"), commandDigest: fixture.profile.commandDigest },
+    executablePath,
+    dependencyPackage,
+    resolve(packageName: string) {
+      const path = paths.get(packageName);
+      if (!path) throw new Error(`unexpected package ${packageName}`);
+      return path;
+    },
+  };
 }
 
 async function installationFixture() {

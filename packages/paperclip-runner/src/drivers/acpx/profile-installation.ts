@@ -6,7 +6,14 @@ import { verifyAntigravityInstallation } from "./antigravity-installation.js";
 import { assertCursorWorkspacePolicy } from "./cursor-launch-policy.js";
 import { resolveQualifiedAcpxProfile, type QualifiedAcpxAgent, type QualifiedAcpxProfile } from "./qualified-profiles.js";
 import { verifyPiInstallation } from "./pi-installation.js";
-import { verifyQualifiedAcpxInstallation, type VerifiedAcpxInstallation } from "./installation-integrity.js";
+import { prepareQualifiedClaudeInstallationForLaunch, verifyQualifiedAcpxInstallation, type VerifiedAcpxInstallation } from "./installation-integrity.js";
+
+/** Only the launch path may defer Claude's native digest to its command lease. */
+export async function prepareAcpxProfileInstallationForLaunch(profile: QualifiedAcpxProfile, candidateAdmission?: AcpxCandidateStartupAdmission): Promise<VerifiedAcpxInstallation> {
+  if (profile.agent !== "claude") return verifyAcpxProfileInstallation(profile, candidateAdmission);
+  assertAcpxExecutionAdmission(profile, candidateAdmission);
+  return prepareQualifiedClaudeInstallationForLaunch(profile);
+}
 
 /** Closed build-owned registry. Provider branches add their pinned installations here. */
 export async function verifyAcpxProfileInstallation(profile: QualifiedAcpxProfile, candidateAdmission?: AcpxCandidateStartupAdmission): Promise<VerifiedAcpxInstallation> {
