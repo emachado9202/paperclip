@@ -121,7 +121,7 @@ it("ends a missing saved result at the original deadline without a click or repl
     { id: "review", identifier: "QA-2", title: "Saved review" }, Date.now() + 10)).toBe(false);
 });
 
-it("waits for each exact completion callback before reusing the teammate and accounts for all seven runs", async () => {
+it.each(["stale", "foreign"])("re-reads %s callback task state while preserving strict scope and seven-run accounting", async snapshot => {
   const campaignId = "journey-1-deadbeef", names = hireDelegateNames(campaignId), binding = { connectionId: "approved" };
   const lead = { id: "lead", companyId: "company", name: `Lead ${campaignId}`, permissions: { canCreateAgents: true },
     adapterConfig: { model: "fixed-model" }, runtimeConfig: { aiConnection: binding } };
@@ -158,7 +158,8 @@ it("waits for each exact completion callback before reusing the teammate and acc
     if (route === "/api/agents/lead") return lead;
     if (route === "/api/companies/company/chats/lead") return sent ? chat : null;
     if (route === "/api/companies/company/agents") return sent ? [lead, hired] : [lead];
-    if (route === "/api/companies/company/issues") return tasks;
+    if (route === "/api/companies/company/issues") return tasks.map(task => ({ ...task,
+      status: runs.some(row => row.id === `completion-${sent}`) && task.id === `task-${sent}` ? "in_progress" : task.status }));
     if (route === "/api/companies/company/activity?agentId=lead&limit=500") return activity;
     if (route === "/api/issues/chat/comments?order=asc") return structuredClone(comments);
     if (route === "/api/issues/chat/runs" && sent > 1 && !runs.some(row => row.id === `completion-${sent}`) && ++callbackPoll > 1) {
@@ -173,7 +174,10 @@ it("waits for each exact completion callback before reusing the teammate and acc
     const output = /^\/api\/issues\/([^/]+)\/documents\/result(\/revisions)?$/.exec(route);
     if (output) return output[2] ? [{ id: document(output[1]!).latestRevisionId, body: document(output[1]!).body,
       createdByAgentId: "hired", createdByRunId: `child-${output[1]!.split("-")[1]}` }] : document(output[1]!);
-    if (route.startsWith("/api/issues/")) return tasks.find(row => route.endsWith(`/${row.id}`));
+    if (route.startsWith("/api/issues/")) {
+      const task = tasks.find(row => route.endsWith(`/${row.id}`));
+      return snapshot === "foreign" && task ? { ...task, projectId: "foreign" } : task;
+    }
     throw new Error(route);
   }, async post() { return { id: "project", companyId: "company", name: names.project }; } };
   const reply = { async isVisible() { return true; }, locator(selector: string) { return selector === "a[href]"
@@ -183,8 +187,14 @@ it("waits for each exact completion callback before reusing the teammate and acc
     agent: { id: "lead", model: "fixed-model", provider: "opencode", runtimeMode: "native" }, environmentId: "environment" } as unknown as JourneyContext;
   const evidence = { checks: [] } as unknown as JourneyEvidence, owned: Row[] = [];
   const directory = await mkdtemp(path.join(os.tmpdir(), "hire-completion-")); directories.push(directory);
-  await hireDelegateReuse(context, { async own(row: Row) { owned.push(row); } } as unknown as TargetSession, campaignId, evidence,
+  const execution = hireDelegateReuse(context, { async own(row: Row) { owned.push(row); } } as unknown as TargetSession, campaignId, evidence,
     { deadlineAt: Date.now() + 10_000, directory, capture: async () => {} });
+  if (snapshot === "foreign") {
+    await expect(execution).rejects.toMatchObject({ code: "hire_resource_scope_mismatch" });
+    expect(sendChatMessage).toHaveBeenCalledTimes(2);
+    return;
+  }
+  await execution;
   expect(stages).toEqual([0, 1, 4]); expect(runs).toHaveLength(7); expect(sendChatMessage).toHaveBeenCalledTimes(3);
   expect(evidence.checks).toContainEqual({ id: "delegated-result-visible-after-reload", passed: true });
   expect(owned.find(row => row.id === "chat")?.freshChat).toEqual({ companyId: "company", userId: "user", leadAgentId: "lead", absent: true });

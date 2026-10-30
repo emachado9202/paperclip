@@ -86,6 +86,18 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
     }
     if (owned.scopeMismatch) throw new JourneyError("failed", "hire_resource_scope_mismatch");
     if (owned.agents.length) hiredId = assertHireBinding(scope, owned.agents, hiredId).id;
+    // These list and run reads are independent snapshots. A newly admitted
+    // completion callback proves its task committed Done after an older list
+    // snapshot; read that exact already-audited task again before grading.
+    const completedIds = new Set(leadRuns.filter(run => run.contextSnapshot?.wakeReason === "chat_task_completed")
+      .flatMap(run => Array.isArray(run.contextSnapshot?.chatCompletionUpdates) ? run.contextSnapshot.chatCompletionUpdates.map((row: Row) => row.id) : []));
+    owned.tasks = await Promise.all(owned.tasks.map(async task => {
+      if (!completedIds.has(task.id)) return task;
+      const current = await readObserved<Task>(`/api/issues/${task.id}`);
+      if (current.id !== task.id || current.companyId !== scope!.companyId || current.projectId !== scope!.projectId
+        || current.assigneeAgentId !== hiredId || current.title !== task.title) throw new JourneyError("failed", "hire_resource_scope_mismatch");
+      return current;
+    }));
     const runs = [...leadRuns, ...(await Promise.all(owned.tasks.map(task => readRuns(task.id)))).flat()];
     const comments = await readObserved<Row[]>(`/api/issues/${chat.id}/comments?order=asc`);
     const requestIds = comments.filter(row => row.authorUserId === context.user.id).map(row => row.id);
