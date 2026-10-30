@@ -3762,6 +3762,12 @@ Timings describe local SQL work and do not establish hosted request latency.
 
 ### Budget accounting performance
 
+Budget overview reads retain policies and incidents after their agent or project
+is permanently deleted, displaying `Deleted agent` or `Deleted project` with the
+original scope IDs and accounting history. These display records do not grant
+execution authority: admission and policy changes still require a real scope in
+the same company. Other database failures remain visible.
+
 Budget admission and settlement share the company accounting lock. They evaluate
 only the company, responsible agent, and applicable project. Running usage is an
 internal exposure projection, not a provisional ledger charge. Cancellation and
