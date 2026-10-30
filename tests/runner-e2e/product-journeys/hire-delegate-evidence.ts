@@ -13,6 +13,18 @@ export interface HireScope {
 }
 export const hireRunIssueId = (run: Row) => run.issueId ?? run.nativeIssueId ?? run.contextSnapshot?.issueId ?? run.contextSnapshot?.taskId;
 
+/** A full newest-first page is complete for these runs only if it reaches their start. */
+export function assertHireAuditCoverage(activity: Row[], leadRuns: Row[]) {
+  if (!Array.isArray(activity) || activity.length > 500) throw new JourneyError("failed", "hire_activity_coverage_unavailable");
+  if (activity.length < 500) return;
+  if (!leadRuns.length) return; // No native actor exists yet; observation will poll again.
+  const starts = leadRuns.map(run => Date.parse(run.startedAt ?? run.createdAt));
+  const oldest = Math.min(...activity.map(event => Date.parse(event.createdAt)));
+  if (!starts.every(Number.isFinite) || !Number.isFinite(oldest) || oldest > Math.min(...starts)) {
+    throw new JourneyError("failed", "hire_activity_coverage_unavailable");
+  }
+}
+
 /** Exclude unrelated work in a persistent company; require the real native actor's audit. */
 export function observedHireResources<A extends Row, T extends Row>(scope: HireScope, state: { agents: A[]; tasks: T[]; activity: Row[]; leadRuns: Row[] }) {
   const names = hireDelegateNames(scope.campaignId);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertHireBinding, assertHireDocument, assertHireRuns, hireDelegateNames, observedHireResources, type HireScope } from "./hire-delegate-evidence.js";
+import { assertHireAuditCoverage, assertHireBinding, assertHireDocument, assertHireRuns, hireDelegateNames, observedHireResources, type HireScope } from "./hire-delegate-evidence.js";
 import { agentJourneyRuns, journeyRequiredChecks } from "./success-contract.js";
 
 type Row = Record<string, any>;
@@ -21,6 +21,13 @@ describe("deployment hiring qualification", () => {
   it("uses five bounded native runs and has closed retained-result success requirements", () => {
     expect(agentJourneyRuns["hire-delegate-reuse"]).toBe(5);
     expect(journeyRequiredChecks["hire-delegate-reuse"]).toContain("review-authored-by-same-hired-run");
+  });
+  it("accepts old activity only when the page covers the exact current lead runs", () => {
+    const activity = Array.from({ length: 500 }, () => ({ createdAt: "2026-10-29T00:00:00Z" }));
+    expect(() => assertHireAuditCoverage(activity, [{ startedAt: "2026-10-30T00:00:00Z" }])).not.toThrow();
+    expect(() => assertHireAuditCoverage(activity, [{ startedAt: "2026-10-28T00:00:00Z" }])).toThrow();
+    expect(() => assertHireAuditCoverage(activity, [{}])).toThrow();
+    expect(() => assertHireAuditCoverage(activity, [])).not.toThrow();
   });
   it("trusts the native actor's actual hire/task receipts, not matching names in a shared company", () => {
     const f = fixture();
@@ -69,6 +76,7 @@ describe("deployment hiring qualification", () => {
       expect(() => grade(document, [{ ...revision, ...change }])).toThrow();
     }
     expect(() => grade({ ...document, issueId: "other" })).toThrow();
+    expect(() => grade({ ...document, key: "plan" })).toThrow();
     expect(() => grade(document, [])).toThrow();
     expect(() => grade(document, [revision], [])).toThrow();
   });

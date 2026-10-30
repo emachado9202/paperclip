@@ -3,8 +3,8 @@ import { isDeepStrictEqual } from "node:util";
 import path from "node:path";
 import { expect } from "@playwright/test";
 import { sendChatMessage, readChatOutputDocument, type ChatIssue, type ChatRun } from "../chat-flow.js";
-import { assertChatHire } from "../chat-hardening.js";
-import { assertHireBinding, assertHireDocument, assertHireRuns, hireDelegateNames, hireRunIssueId, observedHireResources, type HireScope } from "./hire-delegate-evidence.js";
+import { assertChatHire, mutableIssueSnapshot } from "../chat-hardening.js";
+import { assertHireAuditCoverage, assertHireBinding, assertHireDocument, assertHireRuns, hireDelegateNames, hireRunIssueId, observedHireResources, type HireScope } from "./hire-delegate-evidence.js";
 import { JourneyError, type JourneyContext, type JourneyEvidence, type TargetSession } from "./types.js";
 
 type Row = Record<string, any>;
@@ -33,7 +33,7 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
   if (project.companyId !== context.company.id || !project.id || project.name !== names.project) throw new JourneyError("failed", "hire_project_binding_mismatch");
   await session.own({ kind: "project", name: names.project, id: project.id, journeyId: "hire-delegate-reuse" });
   const chatPath = `/api/companies/${context.company.id}/chats/${agent.id}`;
-  if (await api.get(chatPath)) throw new JourneyError("failed", "hire_chat_must_be_fresh");
+  if (await api.get(chatPath)) throw new JourneyError("unsupported", "fresh_lead_chat_required");
   const chatUrl = `${api.origin}/${context.company.issuePrefix}/chats/${agent.id}`;
   await page.goto(chatUrl, { waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("task-chat-composer-input")).toBeVisible();
@@ -48,7 +48,8 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
   const observe = async () => {
     const chat = await api.get<Row | null>(chatPath);
     if (!chat) return undefined;
-    if (chat.companyId !== context.company.id || chat.assigneeAgentId !== agent.id || !chat.title?.includes(campaignId)) throw new JourneyError("failed", "hire_chat_scope_mismatch");
+    if (chat.companyId !== context.company.id || chat.assigneeAgentId !== agent.id
+      || chat.conversationAgentId !== agent.id || chat.conversationUserId !== context.user.id || chat.createdByUserId !== context.user.id) throw new JourneyError("failed", "hire_chat_scope_mismatch");
     scope ??= { companyId: context.company.id, leadId: agent.id, chatId: chat.id, projectId: project.id, campaignId,
       model: agent.model, provider: agent.provider, environmentId: context.environmentId!, connectionBinding: lead.runtimeConfig.aiConnection };
     if (chat.id !== scope.chatId) throw new JourneyError("failed", "hire_chat_replaced");
@@ -56,12 +57,12 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
     const [leadRuns, agents, tasks, activity] = await Promise.all([readRuns(chat.id),
       api.get<Agent[]>(`/api/companies/${context.company.id}/agents`), api.get<Task[]>(`/api/companies/${context.company.id}/issues`),
       api.get<Row[]>(`/api/companies/${context.company.id}/activity?agentId=${agent.id}&limit=500`)]);
-    if (!Array.isArray(activity) || activity.length >= 500) throw new JourneyError("failed", "hire_activity_coverage_unavailable");
+    assertHireAuditCoverage(activity, leadRuns);
     const owned = observedHireResources(scope, { agents, tasks, activity, leadRuns });
     for (const row of [...owned.agents.map(agent => ({ id: agent.id, kind: "agent" as const, resourceName: agent.name })),
       ...owned.tasks.map(task => ({ id: task.id, kind: "issue" as const, resourceName: task.title }))]) {
       // Register even unexpected campaign-owned children so failure cleanup can retire them.
-      if (!known.has(row.id) && row.resourceName?.includes(campaignId)) {
+      if (!known.has(row.id)) {
         await session.own({ kind: row.kind, name: row.resourceName, id: row.id, journeyId: "hire-delegate-reuse" }); known.add(row.id);
       }
     }
@@ -94,10 +95,12 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
     return state;
   };
   // Hire first. The private adapter prepares this exact owned teammate's budget before delegation.
+  await session.own({ kind: "agent", name: names.hire, journeyId: "hire-delegate-reuse" });
   let state = await turn(`Hire exactly one teammate named ${names.hire}, reporting to you, using your native runner, model, and available AI connection. Do not create or start any tasks yet. Tell me when this teammate is ready.`, 1);
   const hired = assertHireBinding(scope!, state.agents);
   check("one-attributed-native-hire", state.tasks.length === 0);
   const marker = `HIRE${campaignId.replace(/[^a-z0-9]/gi, "")}`;
+  await session.own({ kind: "issue", name: names.checklist, journeyId: "hire-delegate-reuse" });
   state = await turn(`Have the existing ${names.hire} write a concise launch checklist as a saved Paperclip document with the line "Reference: ${marker}". Create exactly one task titled ${names.checklist} in ${names.project}, assigned to that teammate. Link the result here and let the teammate complete it. Do not hire another agent.`, 3);
   const first = state.tasks.find(task => task.title === names.checklist);
   check("first-delegated-task-complete", typeof first?.identifier === "string" && state.tasks.length === 1);
@@ -108,34 +111,45 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
     return document;
   };
   const firstOutput = await readOutput(first!, marker, state.runs);
+  const originalTask = mutableIssueSnapshot(first!);
   check("checklist-authored-by-hired-run");
+  await session.own({ kind: "issue", name: names.review, journeyId: "hire-delegate-reuse" });
   state = await turn(`Have the existing ${names.hire} review the checklist on ${first!.identifier} and write a separate saved review document with the line "Reference: REVIEW${marker}". Create exactly one task titled ${names.review} in ${names.project}, assigned to that same teammate. Include the actual checklist in the handoff. Preserve the original checklist and task. Link the completed review here. Do not hire another agent.`, 5);
   const second = state.tasks.find(task => task.title === names.review);
   check("same-teammate-reused", typeof second?.identifier === "string" && state.tasks.length === 2 && state.tasks.every(task => taskNames.includes(task.title)));
   const reviewOutput = await readOutput(second!, `REVIEW${marker}`, state.runs);
   check("review-authored-by-same-hired-run");
-  check("original-checklist-preserved", isDeepStrictEqual(await api.get(`/api/issues/${first!.id}/documents/${encodeURIComponent(firstOutput.key)}`), firstOutput));
+  check("original-checklist-preserved", isDeepStrictEqual(await api.get(`/api/issues/${first!.id}/documents/${encodeURIComponent(firstOutput.key)}`), firstOutput)
+    && isDeepStrictEqual(mutableIssueSnapshot(await api.get<Task>(`/api/issues/${first!.id}`)), originalTask));
   const binding = lead.runtimeConfig.aiConnection;
   assertChatHire({ agents: state.allAgents, leadId: agent.id, hireName: names.hire, hiredId: hired.id,
     connectionId: binding.connectionId, binding, taskIds: [first!.id, second!.id], tasks: state.tasks, runs: state.runs });
   assertHireRuns(scope!, hired.id, state.tasks, state.runs, 5);
   await page.goto(chatUrl, { waitUntil: "domcontentloaded" }); await page.reload();
   const comments = await api.get<Row[]>(`/api/issues/${state.chat.id}/comments?order=asc`);
-  let linked = false;
+  let resultLink: string | undefined;
   for (const comment of comments.filter(row => row.authorAgentId === agent.id)) {
     const reply = page.locator(`[id=${JSON.stringify(`comment-${comment.id}`)}]`);
     if (!await reply.isVisible()) continue;
     const links = await reply.locator("a[href]").evaluateAll(elements => elements.map(element => element.getAttribute("href")!));
-    linked ||= links.some(href => {
+    resultLink ??= links.find(href => {
       const url = new URL(href, api.origin), parts = url.pathname.split("/");
-      return url.origin === api.origin && parts.includes("issues") && [second!.id, second!.identifier].includes(parts[parts.indexOf("issues") + 1]);
+      return url.origin === api.origin && parts.length === 4 && parts[1] === context.company.issuePrefix
+        && parts[2] === "issues" && [second!.id, second!.identifier].includes(parts[3]);
     });
+    if (resultLink) {
+      await reply.locator(`a[href=${JSON.stringify(resultLink)}]`).first().click();
+      await page.reload();
+      await expect(page).toHaveURL(url => url.origin === api.origin
+        && [second!.id, second!.identifier].some(id => url.pathname === `/${context.company.issuePrefix}/issues/${id}`));
+      await expect(page.getByText(second!.title, { exact: true }).first()).toBeVisible();
+      break;
+    }
   }
-  check("delegated-result-visible-after-reload", linked);
+  check("delegated-result-visible-after-reload", Boolean(resultLink));
   check("configured-model-and-environment");
   await retain("hire-delegate-completed.json", { hiredId: hired.id, firstTaskId: first!.id, secondTaskId: second!.id,
     firstDocument: firstOutput, reviewDocument: reviewOutput, runIds: state.runs.map(run => run.id) });
-  // Capture the exact owned child task, not other personal chat history or authentication UI.
-  await page.goto(`${api.origin}/${context.company.issuePrefix}/issues/${second!.identifier}`, { waitUntil: "domcontentloaded" });
+  // The saved chat link opened this exact owned child task.
   await options.capture("hire-delegate-reuse", "Hired teammate completed and reused", "hire-delegate-reuse.png");
 }
