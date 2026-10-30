@@ -18,8 +18,8 @@ function fixture() {
   return { agent, task, leadRun, taskRun, state, event, run };
 }
 describe("deployment hiring qualification", () => {
-  it("uses five bounded native runs and has closed retained-result success requirements", () => {
-    expect(agentJourneyRuns["hire-delegate-reuse"]).toBe(5);
+  it("uses seven bounded native runs and has closed retained-result success requirements", () => {
+    expect(agentJourneyRuns["hire-delegate-reuse"]).toBe(7);
     expect(journeyRequiredChecks["hire-delegate-reuse"]).toContain("review-authored-by-same-hired-run");
   });
   it("accepts old activity only when the page covers the exact current lead runs", () => {
@@ -66,6 +66,26 @@ describe("deployment hiring qualification", () => {
     }
     expect(() => assertHireRuns(scope, f.agent.id, [f.task], [f.taskRun, f.taskRun])).toThrow();
     expect(() => assertHireRuns(scope, f.agent.id, [f.task], [f.leadRun, f.taskRun], 5)).toThrow();
+  });
+  it("accounts for three requested lead turns, two exact completion callbacks and two child runs", () => {
+    const f = fixture(), second = { ...f.task, id: "review", identifier: "TEST-2" };
+    const requested = ["message-1", "message-2", "message-3"].map((id, i) => ({ ...f.run(`lead-${i}`, scope.chatId, scope.leadId),
+      contextSnapshot: { ...f.leadRun.contextSnapshot, source: "issue.comment", wakeCommentId: id } }));
+    const callbacks = [f.task, second].map((task, i) => ({ ...f.run(`completion-${i}`, scope.chatId, scope.leadId), invocationSource: "automation", triggerDetail: "system",
+      contextSnapshot: { ...f.leadRun.contextSnapshot, wakeReason: "chat_task_completed", wakeSource: "automation", wakeTriggerDetail: "system",
+        chatCompletionDeliveryIds: [`delivery-${i}`], chatCompletionUpdates: [{ id: task.id, status: "done" }] } }));
+    const runs = [...requested, ...callbacks, f.taskRun, f.run("review-run", second.id, f.agent.id)];
+    const comments = callbacks.map(run => ({ companyId: scope.companyId, issueId: scope.chatId, authorAgentId: scope.leadId, createdByRunId: run.id, body: "Completed saved result" }));
+    const grade = (value = runs, replies = comments) => assertHireRuns(scope, f.agent.id, [f.task, second], value, 7, ["message-1", "message-2", "message-3"], replies);
+    expect(() => grade()).not.toThrow();
+    expect(() => grade(runs, [])).toThrow("hire_completion_reply_missing");
+    for (const change of [{ invocationSource: "on_demand" }, { contextSnapshot: { ...callbacks[0]!.contextSnapshot, chatCompletionUpdates: [{ id: "foreign", status: "done" }] } },
+      { contextSnapshot: { ...callbacks[0]!.contextSnapshot, chatCompletionDeliveryIds: ["delivery-1"] } },
+      { contextSnapshot: { ...callbacks[0]!.contextSnapshot, wakeReason: "arbitrary_extra_turn" } }]) {
+      const corrupted = runs.map(row => row.id === "completion-0" ? { ...row, ...change } : row);
+      expect(() => grade(corrupted)).toThrow();
+    }
+    expect(() => grade([...runs, f.run("extra", scope.chatId, scope.leadId)])).toThrow();
   });
   it("requires the saved document revision to come from the successful hired-agent work run", () => {
     const f = fixture(), body = "Reference: independent-marker";

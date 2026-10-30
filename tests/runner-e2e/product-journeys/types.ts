@@ -112,7 +112,8 @@ export interface TargetSession {
   /** Publish the observed finalization failure without releasing resources or leases. */
   checkpointEvidence?(input?: TargetLifecycleInput): Promise<void>;
   /** Durable intent before creation; receipt immediately after creation. */
-  own(resource: { kind: "issue" | "agent" | "connection" | "tool-connection" | "skill" | "project"; name: string; id?: string; journeyId?: JourneyId }): Promise<void>;
+  own(resource: { kind: "issue" | "agent" | "connection" | "tool-connection" | "skill" | "project"; name: string; id?: string; journeyId?: JourneyId;
+    freshChat?: { companyId: string; userId: string; leadAgentId: string; absent: true } }): Promise<void>;
 }
 export interface TargetProvider {
   version: 1;

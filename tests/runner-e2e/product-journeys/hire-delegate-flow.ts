@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import path from "node:path";
-import { expect } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import { sendChatMessage, readChatOutputDocument, type ChatIssue, type ChatRun } from "../chat-flow.js";
 import { assertChatHire, mutableIssueSnapshot } from "../chat-hardening.js";
 import { ConnectionFailure } from "../connection-config.js";
@@ -36,6 +36,10 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
   await session.own({ kind: "project", name: names.project, id: project.id, journeyId: "hire-delegate-reuse" });
   const chatPath = `/api/companies/${context.company.id}/chats/${agent.id}`;
   if (await api.get(chatPath)) throw new JourneyError("unsupported", "fresh_lead_chat_required");
+  const freshChat = { companyId: context.company.id, userId: context.user.id, leadAgentId: agent.id, absent: true as const };
+  // First-send creates the conversation. Persist scope before any UI action so
+  // a lost response can be recovered through the normal lead/user chat GET.
+  await session.own({ kind: "issue", name: `Chat with ${lead.name}`, journeyId: "hire-delegate-reuse", freshChat });
   const chatUrl = `${api.origin}/${context.company.issuePrefix}/chats/${agent.id}`;
   await page.goto(chatUrl, { waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("task-chat-composer-input")).toBeVisible();
@@ -56,7 +60,7 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
   };
   const readRuns = async (issueId: string) => {
     const summaries = await readObserved<Row[]>(`/api/issues/${issueId}/runs`);
-    if (!Array.isArray(summaries) || summaries.length > 5) throw new JourneyError("failed", "hire_run_limit_mismatch");
+    if (!Array.isArray(summaries) || summaries.length > 7) throw new JourneyError("failed", "hire_run_limit_mismatch");
     return Promise.all(summaries.map(row => readObserved<Run>(`/api/heartbeat-runs/${row.runId}`)));
   };
   const observe = async () => {
@@ -67,7 +71,7 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
     scope ??= { companyId: context.company.id, leadId: agent.id, chatId: chat.id, projectId: project.id, campaignId,
       model: agent.model, provider: agent.provider, environmentId: context.environmentId!, connectionBinding: lead.runtimeConfig.aiConnection };
     if (chat.id !== scope.chatId) throw new JourneyError("failed", "hire_chat_replaced");
-    if (!known.has(chat.id)) { await session.own({ kind: "issue", name: chat.title, id: chat.id, journeyId: "hire-delegate-reuse" }); known.add(chat.id); }
+    if (!known.has(chat.id)) { await session.own({ kind: "issue", name: chat.title, id: chat.id, journeyId: "hire-delegate-reuse", freshChat }); known.add(chat.id); }
     const [leadRuns, agents, tasks, activity] = await Promise.all([readRuns(chat.id),
       readObserved<Agent[]>(`/api/companies/${context.company.id}/agents`), readObserved<Task[]>(`/api/companies/${context.company.id}/issues`),
       readObserved<Row[]>(`/api/companies/${context.company.id}/activity?agentId=${agent.id}&limit=500`)]);
@@ -83,18 +87,23 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
     if (owned.scopeMismatch) throw new JourneyError("failed", "hire_resource_scope_mismatch");
     if (owned.agents.length) hiredId = assertHireBinding(scope, owned.agents, hiredId).id;
     const runs = [...leadRuns, ...(await Promise.all(owned.tasks.map(task => readRuns(task.id)))).flat()];
-    assertHireRuns(scope, hiredId, owned.tasks, runs);
+    const comments = await readObserved<Row[]>(`/api/issues/${chat.id}/comments?order=asc`);
+    const requestIds = comments.filter(row => row.authorUserId === context.user.id).map(row => row.id);
+    assertHireRuns(scope, hiredId, owned.tasks, runs, undefined, requestIds, comments);
     await retain("hire-delegate-observation.json", { scope: { ...scope, connectionBinding: undefined }, chat, project,
       agents: owned.agents.map(row => ({ id: row.id, name: row.name, reportsTo: row.reportsTo })), tasks: owned.tasks,
       runs: runs.map(run => ({ id: run.id, issueId: hireRunIssueId(run), agentId: run.agentId, status: run.status })) });
-    return { chat, ...owned, runs, allAgents: agents, activity };
+    return { chat, ...owned, runs, requestIds, comments, allAgents: agents, activity };
   };
   const waitForIdle = async (count: number) => {
     while (Date.now() < options.deadlineAt) {
       try {
         const state = await observe();
         if (state && state.runs.length === count && state.runs.every(run => run.status === "succeeded")
-          && state.chat.status === "in_review" && state.chat.conversationState === "waiting") return state;
+          && state.chat.status === "in_review" && state.chat.conversationState === "waiting") {
+          assertHireRuns(scope!, hiredId, state.tasks, state.runs, count, state.requestIds, state.comments);
+          return state;
+        }
       } catch (error) {
         if (!(error instanceof HireReadTransportError)) throw error;
       }
@@ -120,7 +129,7 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
   check("one-attributed-native-hire", state.tasks.length === 0);
   const marker = `HIRE${campaignId.replace(/[^a-z0-9]/gi, "")}`;
   await session.own({ kind: "issue", name: names.checklist, journeyId: "hire-delegate-reuse" });
-  state = await turn(`Have the existing ${names.hire} write a concise launch checklist as a saved Paperclip document with the line "Reference: ${marker}". Create exactly one task titled ${names.checklist} in ${names.project}, assigned to that teammate. Link the result here and let the teammate complete it. Do not hire another agent.`, 3);
+  state = await turn(`Have the existing ${names.hire} write a concise launch checklist as a saved Paperclip document with the line "Reference: ${marker}". Create exactly one task titled ${names.checklist} in ${names.project}, assigned to that teammate. Link the result here and let the teammate complete it. Do not hire another agent.`, 4);
   const first = state.tasks.find(task => task.title === names.checklist);
   check("first-delegated-task-complete", typeof first?.identifier === "string" && state.tasks.length === 1);
   const readOutput = async (task: Row, token: string, runs: Row[]) => {
@@ -133,7 +142,7 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
   const originalTask = mutableIssueSnapshot(await api.get<Task>(`/api/issues/${first!.id}`));
   check("checklist-authored-by-hired-run");
   await session.own({ kind: "issue", name: names.review, journeyId: "hire-delegate-reuse" });
-  state = await turn(`Have the existing ${names.hire} review the checklist on ${first!.identifier} and write a separate saved review document with the line "Reference: REVIEW${marker}". Create exactly one task titled ${names.review} in ${names.project}, assigned to that same teammate. Include the actual checklist in the handoff. Preserve the original checklist and task. Link the completed review here. Do not hire another agent.`, 5);
+  state = await turn(`Have the existing ${names.hire} review the checklist on ${first!.identifier} and write a separate saved review document with the line "Reference: REVIEW${marker}". Create exactly one task titled ${names.review} in ${names.project}, assigned to that same teammate. Include the actual checklist in the handoff. Preserve the original checklist and task. Link the completed review here. Do not hire another agent.`, 7);
   const second = state.tasks.find(task => task.title === names.review);
   check("same-teammate-reused", typeof second?.identifier === "string" && state.tasks.length === 2 && state.tasks.every(task => taskNames.includes(task.title)));
   const reviewOutput = await readOutput(second!, `REVIEW${marker}`, state.runs);
@@ -143,32 +152,45 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
   const binding = lead.runtimeConfig.aiConnection;
   assertChatHire({ agents: state.allAgents, leadId: agent.id, hireName: names.hire, hiredId: hired.id,
     connectionId: binding.connectionId, binding, taskIds: [first!.id, second!.id], tasks: state.tasks, runs: state.runs });
-  assertHireRuns(scope!, hired.id, state.tasks, state.runs, 5);
+  assertHireRuns(scope!, hired.id, state.tasks, state.runs, 7, state.requestIds, state.comments);
   await page.goto(chatUrl, { waitUntil: "domcontentloaded" }); await page.reload();
   const comments = await api.get<Row[]>(`/api/issues/${state.chat.id}/comments?order=asc`);
-  let resultLink: string | undefined;
-  for (const comment of comments.filter(row => row.authorAgentId === agent.id)) {
-    const reply = page.locator(`[id=${JSON.stringify(`comment-${comment.id}`)}]`);
-    if (!await reply.isVisible()) continue;
-    const links = await reply.locator("a[href]").evaluateAll(elements => elements.map(element => element.getAttribute("href")!));
-    resultLink ??= links.find(href => {
-      const url = new URL(href, api.origin), parts = url.pathname.split("/");
-      return url.origin === api.origin && parts.length === 4 && parts[1] === context.company.issuePrefix
-        && parts[2] === "issues" && [second!.id, second!.identifier].includes(parts[3]);
-    });
-    if (resultLink) {
-      await reply.locator(`a[href=${JSON.stringify(resultLink)}]`).first().click();
-      await page.reload();
-      await expect(page).toHaveURL(url => url.origin === api.origin
-        && [second!.id, second!.identifier].some(id => url.pathname === `/${context.company.issuePrefix}/issues/${id}`));
-      await expect(page.getByTestId("issue-detail-header").getByRole("heading", { name: second!.title, exact: true })).toBeVisible();
-      break;
-    }
-  }
-  check("delegated-result-visible-after-reload", Boolean(resultLink));
+  check("delegated-result-visible-after-reload", await openSavedHireResult(page, api.origin, context.company.issuePrefix, comments, agent.id, second!, options.deadlineAt));
   check("configured-model-and-environment");
   await retain("hire-delegate-completed.json", { hiredId: hired.id, firstTaskId: first!.id, secondTaskId: second!.id,
-    firstDocument: firstOutput, reviewDocument: reviewOutput, runIds: state.runs.map(run => run.id) });
+    firstDocument: firstOutput, reviewDocument: reviewOutput, runIds: state.runs.map(run => run.id),
+    turns: state.runs.map(run => ({ id: run.id, issueId: hireRunIssueId(run), agentId: run.agentId,
+      wakeReason: run.contextSnapshot?.wakeReason, wakeCommentId: run.contextSnapshot?.wakeCommentId,
+      chatCompletionDeliveryIds: run.contextSnapshot?.chatCompletionDeliveryIds, chatCompletionUpdates: run.contextSnapshot?.chatCompletionUpdates })),
+    completionReplies: state.comments.filter(comment => state.runs.some(run => run.id === comment.createdByRunId
+      && run.contextSnapshot?.wakeReason === "chat_task_completed")).map(comment => ({ id: comment.id, createdByRunId: comment.createdByRunId })) });
   // The saved chat link opened this exact owned child task.
   await options.capture("hire-delegate-reuse", "Hired teammate completed and reused", "hire-delegate-reuse.png");
+}
+
+/** Reload queries render asynchronously. Poll saved replies and their links only
+ * until the same journey deadline; never resend the user's request. */
+export async function openSavedHireResult(page: Page, origin: string, issuePrefix: string, comments: Row[], leadId: string, task: Row, deadlineAt: number) {
+  while (Date.now() < deadlineAt) {
+    for (const comment of comments.filter(row => row.authorAgentId === leadId)) {
+      const reply = page.locator(`[id=${JSON.stringify(`comment-${comment.id}`)}]`);
+      if (!await reply.isVisible()) continue;
+      const links = await reply.locator("a[href]").evaluateAll(elements => elements.map(element => element.getAttribute("href")!));
+      const href = links.find(href => {
+        const url = new URL(href, origin), parts = url.pathname.split("/");
+        return url.origin === origin && parts.length === 4 && parts[1] === issuePrefix
+          && parts[2] === "issues" && [task.id, task.identifier].includes(parts[3]);
+      });
+      if (!href) continue;
+      await reply.locator(`a[href=${JSON.stringify(href)}]`).first().click({ timeout: Math.max(1, deadlineAt - Date.now()) });
+      await page.reload();
+      await expect(page).toHaveURL(url => url.origin === origin
+        && [task.id, task.identifier].some(id => url.pathname === `/${issuePrefix}/issues/${id}`), { timeout: Math.max(1, deadlineAt - Date.now()) });
+      await expect(page.getByTestId("issue-detail-header").getByRole("heading", { name: task.title, exact: true }))
+        .toBeVisible({ timeout: Math.max(1, deadlineAt - Date.now()) });
+      return true;
+    }
+    await new Promise(resolve => setTimeout(resolve, Math.min(200, Math.max(1, deadlineAt - Date.now()))));
+  }
+  return false;
 }

@@ -42,7 +42,9 @@ export function observedHireResources<A extends Row, T extends Row>(scope: HireS
   // Foreign or malformed rows are never owned, and still make the journey fail.
   return { agents: ownedAgents, tasks: ownedTasks, hires: ownedAgents.filter(agent => agent.name === names.hire),
     expectedTasks: ownedTasks.filter(task => [names.checklist, names.review].includes(task.title)),
-    scopeMismatch: agents.some(agent => !ownable(agent, agent.name) || agent.reportsTo !== scope.leadId)
+    scopeMismatch: state.activity.some(event => [...agents, ...tasks].some(row => row.id === event.entityId)
+      && state.leadRuns.some(run => run.id === event.runId && run.contextSnapshot?.wakeReason === "chat_task_completed"))
+      || agents.some(agent => !ownable(agent, agent.name) || agent.reportsTo !== scope.leadId)
       || tasks.some(task => !ownable(task, task.title) || task.projectId !== scope.projectId) };
 }
 export function assertHireBinding(scope: HireScope, agents: Row[], hiredId?: string) {
@@ -57,20 +59,55 @@ export function assertHireBinding(scope: HireScope, agents: Row[], hiredId?: str
   }
   return hired;
 }
-export function assertHireRuns(scope: HireScope, hiredId: string | undefined, tasks: Row[], runs: Row[], count?: number) {
+export function assertHireRuns(scope: HireScope, hiredId: string | undefined, tasks: Row[], runs: Row[], count?: number, requestedCommentIds?: string[], comments?: Row[]) {
   const bindings = new Map([[scope.chatId, scope.leadId], ...tasks.map(task => [task.id, hiredId] as [string, string | undefined])]);
-  if (runs.length > 5 || count !== undefined && runs.length !== count || new Set(runs.map(run => run.id)).size !== runs.length) {
+  if (runs.length > 7 || count !== undefined && runs.length !== count || new Set(runs.map(run => run.id)).size !== runs.length) {
     throw new JourneyError("failed", "hire_run_limit_mismatch");
   }
+  const requests = new Set<string>(), deliveries = new Set<string>(), completedTasks = new Set<string>();
+  let callbackCount = 0;
   for (const run of runs) {
     const issueId = hireRunIssueId(run), provider = run.runnerProfileJson?.nativeExecutionInput?.provider;
     if (!bindings.has(issueId) || !bindings.get(issueId) || run.companyId !== scope.companyId || run.agentId !== bindings.get(issueId)) {
       throw new JourneyError("failed", "hire_run_scope_mismatch");
     }
+    if (requestedCommentIds && run.agentId === scope.leadId) {
+      const context = run.contextSnapshot ?? {};
+      if (context.wakeReason === "chat_task_completed") {
+        callbackCount++;
+        const ids = context.chatCompletionDeliveryIds, updates = context.chatCompletionUpdates;
+        if (callbackCount > 2 || run.invocationSource !== "automation" || run.triggerDetail !== "system"
+          || context.wakeSource !== "automation" || context.wakeTriggerDetail !== "system" || context.wakeCommentId
+          || !Array.isArray(ids) || ids.length !== 1 || typeof ids[0] !== "string" || !ids[0] || deliveries.has(ids[0])) {
+          throw new JourneyError("failed", "hire_completion_binding_mismatch");
+        }
+        deliveries.add(ids[0]);
+        // Admission freezes exact completed task facts; a queued run has not yet
+        // received that projection. Successful callbacks must have it.
+        if (run.status === "succeeded" || updates !== undefined) {
+          if (!Array.isArray(updates) || updates.length !== 1 || updates[0]?.status !== "done"
+            || !tasks.some(task => task.id === updates[0]?.id && task.status === "done") || completedTasks.has(updates[0].id)) {
+            throw new JourneyError("failed", "hire_completion_binding_mismatch");
+          }
+          if (run.status === "succeeded" && comments && !comments.some(comment => comment.companyId === scope.companyId
+            && comment.issueId === scope.chatId && comment.authorAgentId === scope.leadId && !comment.authorUserId
+            && comment.createdByRunId === run.id && typeof comment.body === "string" && comment.body.trim())) {
+            throw new JourneyError("failed", "hire_completion_reply_missing");
+          }
+          completedTasks.add(updates[0].id);
+        }
+      } else {
+        if (context.source !== "issue.comment" || !requestedCommentIds.includes(context.wakeCommentId)
+          || requests.has(context.wakeCommentId) || requests.size >= 3) throw new JourneyError("failed", "hire_requested_turn_mismatch");
+        requests.add(context.wakeCommentId);
+      }
+    }
     if (!["queued", "running", "succeeded"].includes(run.status)) throw new JourneyError("failed", "hire_native_run_failed");
     if (run.status === "succeeded" && (run.runtimeMode !== "native" || provider?.kind !== scope.provider || provider?.model !== scope.model
       || run.contextSnapshot?.paperclipEnvironment?.id !== scope.environmentId)) throw new JourneyError("failed", "hire_run_runtime_mismatch");
   }
+  if (requestedCommentIds && count !== undefined && (requests.size !== requestedCommentIds.length
+    || callbackCount !== tasks.length || completedTasks.size !== tasks.length)) throw new JourneyError("failed", "hire_turn_accounting_mismatch");
 }
 export function assertHireDocument(scope: HireScope, task: Row, document: Row, revisions: Row[], runs: Row[], marker: string, hiredId: string) {
   const work = runs.filter(run => hireRunIssueId(run) === task.id);

@@ -32,7 +32,7 @@ never start a server or depend on a tenant filesystem.
 | `protected-actions` | Native agent; four work runs; authenticated reachable review-service fixture | Approve one action and decline another on separate owned tasks; verify zero calls before either decision, one after approval, zero after decline and a truthful saved explanation |
 | `create-skill-studio` | Native agent with skill-write permission; one work run | Create a uniquely named company skill, open its activity card, edit in Studio, reload and verify task-card readback |
 | `stop-redirect` | Native agent; three work runs; qualified Docker oracle | Download a verified checkpoint, Stop an active revision, require native cancellation acknowledgement, submit a new direction once and verify completion without original-run activity |
-| `hire-delegate-reuse` | Native lead with a fresh user chat and scoped hiring permission; Agent Chat enabled; direct hiring policy; five work runs | Hire one teammate, delegate a saved checklist, reuse the same teammate for a saved review, verify native run and revision authorship, preserve the original, and follow the lead's saved result link after reload |
+| `hire-delegate-reuse` | Native lead with a fresh user chat and scoped hiring permission; Agent Chat enabled; direct hiring policy; seven work runs | Hire one teammate, delegate a saved checklist, reuse the same teammate for a saved review, verify native run and revision authorship, preserve the original, and follow the lead's saved result link after reload |
 | `cloud-onboarding` | Signed-in admitted Cloud account; fresh workspace; qualified bounded provider route | Create workspace in the portal, connect API key and native Codex agent in the wizard, complete a task, download and independently check its artifact |
 
 The shared Studio helper waits for the original saved file body before typing.
@@ -44,11 +44,19 @@ It gives each disposable project, agent, and task a campaign name. The first
 turn only hires. The target provider can then verify the native creation audit
 and prepare that exact teammate's budget before the next turn delegates work.
 The checklist and review each require one successful child run and a current
-document revision authored by that run. The lead uses three runs, for five
-work runs in total. Setup probes and unpriced usage remain separate accounting
+document revision authored by that run. The lead uses three requested turns and
+two separate server completion callbacks,
+for seven work runs in total. Each callback must identify exactly one of the two
+completed child tasks with a distinct server delivery receipt; arbitrary extra
+lead turns fail. The journey waits for each callback before the next user turn.
+Setup probes and unpriced usage remain separate accounting
 uncertainties. The journey does not change company hiring policy or instance
 features. The provider must own and clean up the hired agent, both child tasks,
-the chat, and the project, including unexpected campaign-owned children after
+the chat, and the project. Before the first send, a fresh-chat intent records the
+company, user and owned lead after a normal GET confirms no existing chat.
+Recovery can attach only that exact fresh conversation. Saved replies and links
+are allowed to render after reload within the journey deadline. Cleanup includes
+unexpected campaign-owned children after
 failure. A new deployment must qualify the journey before scheduled admission.
 Observation retries are limited to typed transient GET transport failures within
 the existing deadline. Ownership callbacks and grading failures are never

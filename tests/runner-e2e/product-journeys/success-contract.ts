@@ -1,6 +1,6 @@
 /** Closed, target-independent success requirements used by dispatch and retained evidence. */
 export const agentJourneyRuns = { "ask-question": 1, "plan-revise-accept": 3, "build-revise": 2,
-  "protected-actions": 4, "create-skill-studio": 1, "stop-redirect": 3, "hire-delegate-reuse": 5 } as const;
+  "protected-actions": 4, "create-skill-studio": 1, "stop-redirect": 3, "hire-delegate-reuse": 7 } as const;
 export const journeyRequiredChecks: Record<string, readonly string[]> = {
   "task-properties": ["assignment-persisted", "no-agent-work"],
   "task-create": ["browser-created-task-persisted", "no-agent-work"],
