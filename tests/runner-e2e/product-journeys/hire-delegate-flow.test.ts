@@ -27,7 +27,7 @@ async function fixture(options: { readError?: Error; mutate?(agents: Row[], task
   const run = { id: "lead-run", companyId: "company", agentId: lead.id, issueId: chat.id, status: "succeeded", runtimeMode: "native",
     contextSnapshot: { source: "issue.comment", wakeCommentId: "user-comment", paperclipEnvironment: { id: "environment" } }, runnerProfileJson: { nativeExecutionInput: { provider: { kind: "opencode", model: "fixed-model" } } } };
   options.mutate?.(agents, tasks);
-  const audit = (action: string, entityId: string) => ({ companyId: "company", actorType: "agent", actorId: lead.id, agentId: lead.id, runId: run.id, action, entityId });
+  const audit = (action: string, entityId: string) => ({ companyId: "company", actorType: "agent", actorId: lead.id, agentId: lead.id, runId: run.id, action, entityId, entityType: action.startsWith("agent.") ? "agent" : "issue" });
   const activity = [audit("agent.hire_created", hire.id), ...tasks.map(task => audit("issue.created", task.id))];
   let sent = false, failedRead = false, runReads = 0;
   const stop = new JourneyError("failed", "test_stop_before_delegation");
@@ -46,6 +46,8 @@ async function fixture(options: { readError?: Error; mutate?(agents: Row[], task
       return [{ runId: run.id }];
     }
     if (route === "/api/heartbeat-runs/lead-run") return run;
+    if (route === "/api/agents/hired") return agents.find(row => row.id === "hired");
+    if (route.startsWith("/api/issues/") && tasks.some(row => route === `/api/issues/${row.id}`)) return tasks.find(row => route === `/api/issues/${row.id}`);
     if (route === "/api/companies/company/agents") return agents;
     if (route === "/api/companies/company/issues") return tasks;
     if (route === "/api/companies/company/activity?agentId=lead&limit=500") return activity;
@@ -121,7 +123,7 @@ it("ends a missing saved result at the original deadline without a click or repl
     { id: "review", identifier: "QA-2", title: "Saved review" }, Date.now() + 10)).toBe(false);
 });
 
-it.each(["stale", "foreign"])("re-reads %s callback task state while preserving strict scope and seven-run accounting", async snapshot => {
+it.each(["stale", "foreign", "truncated"])("re-reads %s callback task state while preserving strict scope and seven-run accounting", async snapshot => {
   const campaignId = "journey-1-deadbeef", names = hireDelegateNames(campaignId), binding = { connectionId: "approved" };
   const lead = { id: "lead", companyId: "company", name: `Lead ${campaignId}`, permissions: { canCreateAgents: true },
     adapterConfig: { model: "fixed-model" }, runtimeConfig: { aiConnection: binding } };
@@ -136,7 +138,7 @@ it.each(["stale", "foreign"])("re-reads %s callback task state while preserving 
       runnerProfileJson: { nativeExecutionInput: { provider: { kind: "opencode", model: "fixed-model" } } } };
     runs.push(value); return value;
   };
-  const audit = (action: string, entityId: string) => activity.push({ companyId: "company", actorType: "agent", actorId: "lead", agentId: "lead", runId: `lead-${sent}`, action, entityId });
+  const audit = (action: string, entityId: string) => activity.push({ companyId: "company", actorType: "agent", actorId: "lead", agentId: "lead", runId: `lead-${sent}`, action, entityId, entityType: action.startsWith("agent.") ? "agent" : "issue" });
   vi.mocked(sendChatMessage).mockImplementation(async (_page, text) => {
     stages.push(runs.length); sent++; callbackPoll = 0;
     comments.push({ id: `user-${sent}`, companyId: "company", issueId: "chat", authorUserId: "user", body: text });
@@ -157,7 +159,9 @@ it.each(["stale", "foreign"])("re-reads %s callback task state while preserving 
     if (route === "/api/companies/company") return { requireBoardApprovalForNewAgents: false };
     if (route === "/api/agents/lead") return lead;
     if (route === "/api/companies/company/chats/lead") return sent ? chat : null;
+    if (route === "/api/agents/hired") return hired;
     if (route === "/api/companies/company/agents") return sent ? [lead, hired] : [lead];
+    if (route === "/api/companies/company/issues" && snapshot === "truncated") return Array.from({ length: 500 }, (_, i) => ({ id: `old-${i}`, companyId: "company", title: "Higher priority existing work", projectId: "other", status: "backlog" }));
     if (route === "/api/companies/company/issues") return tasks.map(task => ({ ...task,
       status: runs.some(row => row.id === `completion-${sent}`) && task.id === `task-${sent}` ? "in_progress" : task.status }));
     if (route === "/api/companies/company/activity?agentId=lead&limit=500") return activity;

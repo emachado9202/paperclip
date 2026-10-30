@@ -59,7 +59,10 @@ Recovery can attach only that exact fresh conversation. Saved replies and links
 are allowed to render after reload within the journey deadline. Cleanup includes
 unexpected campaign-owned children after
 failure. A new deployment must qualify the journey before scheduled admission.
-Observation retries are limited to typed transient GET transport failures within
+Child discovery reads the exact native creation audit after the run snapshot,
+then fetches each audited agent/task ID directly. It never depends on the first
+page of a shared company list. Each proven child is recorded before the next
+lookup can fail. Observation retries are limited to typed transient GET transport failures within
 the existing deadline. Ownership callbacks and grading failures are never
 retried. Audited same-company children are recorded before manager/project
 checks fail; foreign or malformed rows remain unowned and fail the journey.

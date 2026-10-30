@@ -24,7 +24,7 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
   const company = await api.get<Row>(`/api/companies/${context.company.id}`);
   if (company.requireBoardApprovalForNewAgents !== false) throw new JourneyError("unsupported", "automatic_hiring_policy_required");
   const lead = await api.get<Row>(`/api/agents/${agent.id}`), names = hireDelegateNames(campaignId);
-  if (lead.companyId !== context.company.id || lead.permissions?.canCreateAgents !== true || !lead.runtimeConfig?.aiConnection) {
+  if (lead.id !== agent.id || lead.companyId !== context.company.id || lead.permissions?.canCreateAgents !== true || !lead.runtimeConfig?.aiConnection) {
     throw new JourneyError("unsupported", "owned_hiring_agent_required");
   }
   const check = (id: string, passed = true) => { evidence.checks.push({ id, passed }); if (!passed) throw new JourneyError("failed", id.replaceAll("-", "_")); };
@@ -72,32 +72,39 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
       model: agent.model, provider: agent.provider, environmentId: context.environmentId!, connectionBinding: lead.runtimeConfig.aiConnection };
     if (chat.id !== scope.chatId) throw new JourneyError("failed", "hire_chat_replaced");
     if (!known.has(chat.id)) { await session.own({ kind: "issue", name: chat.title, id: chat.id, journeyId: "hire-delegate-reuse", freshChat }); known.add(chat.id); }
-    const [leadRuns, agents, tasks, activity] = await Promise.all([readRuns(chat.id),
-      readObserved<Agent[]>(`/api/companies/${context.company.id}/agents`), readObserved<Task[]>(`/api/companies/${context.company.id}/issues`),
-      readObserved<Row[]>(`/api/companies/${context.company.id}/activity?agentId=${agent.id}&limit=500`)]);
+    // Read the audit after the run snapshot, then fetch its exact creations.
+    // Shared company lists are paginated and cannot prove this run's children.
+    const leadRuns = await readRuns(chat.id);
+    const activity = await readObserved<Row[]>(`/api/companies/${context.company.id}/activity?agentId=${agent.id}&limit=500`);
     assertHireAuditCoverage(activity, leadRuns);
-    const owned = observedHireResources(scope, { agents, tasks, activity, leadRuns });
-    for (const row of [...owned.agents.map(agent => ({ id: agent.id, kind: "agent" as const, resourceName: agent.name })),
-      ...owned.tasks.map(task => ({ id: task.id, kind: "issue" as const, resourceName: task.title }))]) {
-      // Register even unexpected campaign-owned children so failure cleanup can retire them.
-      if (!known.has(row.id)) {
-        await session.own({ kind: row.kind, name: row.resourceName, id: row.id, journeyId: "hire-delegate-reuse" }); known.add(row.id);
+    const agents: Agent[] = [], tasks: Task[] = [], seen = new Set<string>();
+    let scopeMismatch = false;
+    for (const event of activity) {
+      if (event.companyId !== scope.companyId || event.actorType !== "agent" || event.actorId !== agent.id || event.agentId !== agent.id
+        || !leadRuns.some(run => run.id === event.runId && run.companyId === scope!.companyId && run.agentId === agent.id
+          && hireRunIssueId(run) === chat.id && run.runtimeMode === "native")) continue;
+      const kind = ["agent.hire_created", "agent.created"].includes(event.action) ? "agent"
+        : ["issue.created", "issue.child_created"].includes(event.action) ? "issue" : undefined;
+      if (!kind || event.entityType !== kind) continue;
+      if (typeof event.entityId !== "string" || !event.entityId) throw new JourneyError("failed", "hire_resource_scope_mismatch");
+      const key = `${kind}:${event.entityId}`;
+      if (seen.has(key)) continue;
+      if (seen.size >= 50) throw new JourneyError("failed", "hire_resource_coverage_exceeded");
+      seen.add(key);
+      const row = await readObserved<Row>(`/api/${kind === "agent" ? "agents" : "issues"}/${encodeURIComponent(event.entityId)}`);
+      if (row.id !== event.entityId) throw new JourneyError("failed", "hire_resource_scope_mismatch");
+      if (kind === "agent") agents.push(row as Agent); else tasks.push(row as Task);
+      const observed = observedHireResources(scope, { agents: kind === "agent" ? [row] : [], tasks: kind === "issue" ? [row] : [], activity, leadRuns });
+      scopeMismatch ||= observed.scopeMismatch;
+      for (const resource of [...observed.agents.map(row => ({ kind: "agent" as const, id: row.id, name: row.name })),
+        ...observed.tasks.map(row => ({ kind: "issue" as const, id: row.id, name: row.title }))]) {
+        // Save each proven child before the next exact lookup can fail.
+        if (!known.has(resource.id)) { await session.own({ ...resource, journeyId: "hire-delegate-reuse" }); known.add(resource.id); }
       }
     }
-    if (owned.scopeMismatch) throw new JourneyError("failed", "hire_resource_scope_mismatch");
+    const owned = observedHireResources(scope, { agents, tasks, activity, leadRuns });
+    if (scopeMismatch || owned.scopeMismatch) throw new JourneyError("failed", "hire_resource_scope_mismatch");
     if (owned.agents.length) hiredId = assertHireBinding(scope, owned.agents, hiredId).id;
-    // These list and run reads are independent snapshots. A newly admitted
-    // completion callback proves its task committed Done after an older list
-    // snapshot; read that exact already-audited task again before grading.
-    const completedIds = new Set(leadRuns.filter(run => run.contextSnapshot?.wakeReason === "chat_task_completed")
-      .flatMap(run => Array.isArray(run.contextSnapshot?.chatCompletionUpdates) ? run.contextSnapshot.chatCompletionUpdates.map((row: Row) => row.id) : []));
-    owned.tasks = await Promise.all(owned.tasks.map(async task => {
-      if (!completedIds.has(task.id)) return task;
-      const current = await readObserved<Task>(`/api/issues/${task.id}`);
-      if (current.id !== task.id || current.companyId !== scope!.companyId || current.projectId !== scope!.projectId
-        || current.assigneeAgentId !== hiredId || current.title !== task.title) throw new JourneyError("failed", "hire_resource_scope_mismatch");
-      return current;
-    }));
     const runs = [...leadRuns, ...(await Promise.all(owned.tasks.map(task => readRuns(task.id)))).flat()];
     const comments = await readObserved<Row[]>(`/api/issues/${chat.id}/comments?order=asc`);
     const requestIds = comments.filter(row => row.authorUserId === context.user.id).map(row => row.id);
@@ -105,7 +112,7 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
     await retain("hire-delegate-observation.json", { scope: { ...scope, connectionBinding: undefined }, chat, project,
       agents: owned.agents.map(row => ({ id: row.id, name: row.name, reportsTo: row.reportsTo })), tasks: owned.tasks,
       runs: runs.map(run => ({ id: run.id, issueId: hireRunIssueId(run), agentId: run.agentId, status: run.status })) });
-    return { chat, ...owned, runs, requestIds, comments, allAgents: agents, activity };
+    return { chat, ...owned, runs, requestIds, comments, allAgents: [lead as Agent, ...agents], activity };
   };
   const waitForIdle = async (count: number) => {
     while (Date.now() < options.deadlineAt) {
