@@ -1131,8 +1131,8 @@ async function verifyQualifiedRuntimeExecutable(input: {
     basename(unresolvedExecutablePath),
   );
   if (input.admission === "claude-launch") {
-    const metadata = await lstat(executablePath, { bigint: true });
-    if (metadata.isSymbolicLink() || !metadata.isFile() || metadata.size < 1n ||
+    const metadata = await lstat(executablePath, { bigint: true }).catch(() => null);
+    if (metadata === null || metadata.isSymbolicLink() || !metadata.isFile() || metadata.size < 1n ||
       metadata.size > BigInt(MAX_ACPX_RUNTIME_EXECUTABLE_BYTES) ||
       (metadata.mode & 0o111n) === 0n) {
       throw new Error(`ACPX ${input.profile.agent} runtime executable must be a bounded real executable file`);

@@ -90,11 +90,13 @@ describe("ACPX installation integrity", () => {
     await expect(prepared.openCommand()).rejects.toThrow("runtime executable must be a real regular file");
   }));
 
-  it("rejects non-executable native metadata during Claude launch preparation", () => withLinuxX64TestPlatform(async () => {
+  it.each(["missing", "non-executable"])("rejects %s native metadata during Claude launch preparation without exposing its path", (state) => withLinuxX64TestPlatform(async () => {
     const fixture = await claudeLaunchFixture();
-    await chmod(fixture.executablePath, 0o644);
-    await expect(prepareQualifiedClaudeInstallationForLaunch(fixture.profile, fixture.resolve))
-      .rejects.toThrow("bounded real executable file");
+    if (state === "missing") await rm(fixture.executablePath);
+    else await chmod(fixture.executablePath, 0o644);
+    const error = await prepareQualifiedClaudeInstallationForLaunch(fixture.profile, fixture.resolve).catch(error => error);
+    expect(error.message).toContain("bounded real executable file");
+    expect(error.message).not.toContain(fixture.executablePath);
   }));
 
   it("does not expose deferred native admission for another provider", async () => {
