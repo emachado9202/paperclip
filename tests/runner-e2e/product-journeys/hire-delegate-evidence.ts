@@ -65,7 +65,7 @@ export function assertHireRuns(scope: HireScope, hiredId: string | undefined, ta
     throw new JourneyError("failed", "hire_run_limit_mismatch");
   }
   const requests = new Set<string>(), deliveries = new Set<string>(), completedTasks = new Set<string>();
-  let callbackCount = 0;
+  let callbackCount = 0, completionRepliesReady = true;
   for (const run of runs) {
     const issueId = hireRunIssueId(run), provider = run.runnerProfileJson?.nativeExecutionInput?.provider;
     if (!bindings.has(issueId) || !bindings.get(issueId) || run.companyId !== scope.companyId || run.agentId !== bindings.get(issueId)) {
@@ -89,10 +89,13 @@ export function assertHireRuns(scope: HireScope, hiredId: string | undefined, ta
             || !tasks.some(task => task.id === updates[0]?.id && task.status === "done") || completedTasks.has(updates[0].id)) {
             throw new JourneyError("failed", "hire_completion_binding_mismatch");
           }
-          if (run.status === "succeeded" && comments && !comments.some(comment => comment.companyId === scope.companyId
-            && comment.issueId === scope.chatId && comment.authorAgentId === scope.leadId && !comment.authorUserId
-            && comment.createdByRunId === run.id && typeof comment.body === "string" && comment.body.trim())) {
-            throw new JourneyError("failed", "hire_completion_reply_missing");
+          if (run.status === "succeeded" && comments) {
+            const replies = comments.filter(comment => comment.createdByRunId === run.id);
+            if (replies.some(comment => comment.companyId !== scope.companyId || comment.issueId !== scope.chatId
+              || comment.authorAgentId !== scope.leadId || comment.authorUserId)) throw new JourneyError("failed", "hire_completion_reply_mismatch");
+            // Terminal state is persisted before response.add_comment. Missing
+            // materialization is pending; a different author/binding is not.
+            if (!replies.some(comment => typeof comment.body === "string" && comment.body.trim())) completionRepliesReady = false;
           }
           completedTasks.add(updates[0].id);
         }
@@ -108,6 +111,8 @@ export function assertHireRuns(scope: HireScope, hiredId: string | undefined, ta
   }
   if (requestedCommentIds && count !== undefined && (requests.size !== requestedCommentIds.length
     || callbackCount !== tasks.length || completedTasks.size !== tasks.length)) throw new JourneyError("failed", "hire_turn_accounting_mismatch");
+  if (count !== undefined && !completionRepliesReady) throw new JourneyError("failed", "hire_completion_reply_missing");
+  return completionRepliesReady;
 }
 export function assertHireDocument(scope: HireScope, task: Row, document: Row, revisions: Row[], runs: Row[], marker: string, hiredId: string) {
   const work = runs.filter(run => hireRunIssueId(run) === task.id);

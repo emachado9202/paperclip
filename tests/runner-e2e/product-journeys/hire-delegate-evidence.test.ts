@@ -79,6 +79,9 @@ describe("deployment hiring qualification", () => {
     const grade = (value = runs, replies = comments) => assertHireRuns(scope, f.agent.id, [f.task, second], value, 7, ["message-1", "message-2", "message-3"], replies);
     expect(() => grade()).not.toThrow();
     expect(() => grade(runs, [])).toThrow("hire_completion_reply_missing");
+    expect(assertHireRuns(scope, f.agent.id, [f.task, second], runs, undefined, ["message-1", "message-2", "message-3"], [])).toBe(false);
+    expect(() => assertHireRuns(scope, f.agent.id, [f.task, second], runs, undefined, ["message-1", "message-2", "message-3"],
+      comments.map(comment => ({ ...comment, authorAgentId: "foreign" })))).toThrow("hire_completion_reply_mismatch");
     for (const change of [{ invocationSource: "on_demand" }, { contextSnapshot: { ...callbacks[0]!.contextSnapshot, chatCompletionUpdates: [{ id: "foreign", status: "done" }] } },
       { contextSnapshot: { ...callbacks[0]!.contextSnapshot, chatCompletionDeliveryIds: ["delivery-1"] } },
       { contextSnapshot: { ...callbacks[0]!.contextSnapshot, wakeReason: "arbitrary_extra_turn" } }]) {

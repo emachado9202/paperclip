@@ -123,7 +123,7 @@ it("ends a missing saved result at the original deadline without a click or repl
     { id: "review", identifier: "QA-2", title: "Saved review" }, Date.now() + 10)).toBe(false);
 });
 
-it.each(["stale", "foreign", "truncated"])("re-reads %s callback task state while preserving strict scope and seven-run accounting", async snapshot => {
+it.each(["stale", "foreign", "truncated", "late-reply", "wrong-author"])("re-reads %s callback task state while preserving strict scope and seven-run accounting", async snapshot => {
   const campaignId = "journey-1-deadbeef", names = hireDelegateNames(campaignId), binding = { connectionId: "approved" };
   const lead = { id: "lead", companyId: "company", name: `Lead ${campaignId}`, permissions: { canCreateAgents: true },
     adapterConfig: { model: "fixed-model" }, runtimeConfig: { aiConnection: binding } };
@@ -132,6 +132,7 @@ it.each(["stale", "foreign", "truncated"])("re-reads %s callback task state whil
     conversationUserId: "user", createdByUserId: "user", status: "in_review", conversationState: "waiting" };
   const runs: Row[] = [], tasks: Row[] = [], comments: Row[] = [], activity: Row[] = [], stages: number[] = [];
   let sent = 0, callbackPoll = 0;
+  const replyPolls = new Map<string, number>();
   const run = (id: string, issueId: string, agentId: string, metadata: Row = {}) => {
     const value = { id, companyId: "company", agentId, issueId, status: "succeeded", runtimeMode: "native",
       contextSnapshot: { issueId, paperclipEnvironment: { id: "environment" }, aiConnection: binding, ...metadata },
@@ -165,12 +166,20 @@ it.each(["stale", "foreign", "truncated"])("re-reads %s callback task state whil
     if (route === "/api/companies/company/issues") return tasks.map(task => ({ ...task,
       status: runs.some(row => row.id === `completion-${sent}`) && task.id === `task-${sent}` ? "in_progress" : task.status }));
     if (route === "/api/companies/company/activity?agentId=lead&limit=500") return activity;
-    if (route === "/api/issues/chat/comments?order=asc") return structuredClone(comments);
+    if (route === "/api/issues/chat/comments?order=asc") {
+      if (["late-reply", "wrong-author"].includes(snapshot)) for (const callback of runs.filter(run => run.id.startsWith("completion-"))) {
+        if (comments.some(comment => comment.createdByRunId === callback.id)) continue;
+        const count = (replyPolls.get(callback.id) ?? 0) + 1; replyPolls.set(callback.id, count);
+        if (snapshot === "wrong-author" || count > 1) comments.push({ id: `reply-${callback.id}`, companyId: "company", issueId: "chat",
+          authorAgentId: snapshot === "wrong-author" ? "foreign" : "lead", createdByRunId: callback.id, body: "Saved result completed" });
+      }
+      return structuredClone(comments);
+    }
     if (route === "/api/issues/chat/runs" && sent > 1 && !runs.some(row => row.id === `completion-${sent}`) && ++callbackPoll > 1) {
       const callback = run(`completion-${sent}`, "chat", "lead", { wakeReason: "chat_task_completed", wakeSource: "automation", wakeTriggerDetail: "system",
         chatCompletionDeliveryIds: [`delivery-${sent}`], chatCompletionUpdates: [{ id: `task-${sent}`, status: "done" }] });
       Object.assign(callback, { invocationSource: "automation", triggerDetail: "system" });
-      comments.push({ id: `reply-${sent}`, companyId: "company", issueId: "chat", authorAgentId: "lead", createdByRunId: callback.id, body: "Saved result completed" });
+      if (!["late-reply", "wrong-author"].includes(snapshot)) comments.push({ id: `reply-${sent}`, companyId: "company", issueId: "chat", authorAgentId: "lead", createdByRunId: callback.id, body: "Saved result completed" });
     }
     const issueRuns = /^\/api\/issues\/([^/]+)\/runs$/.exec(route);
     if (issueRuns) return runs.filter(row => row.issueId === issueRuns[1]).map(row => ({ runId: row.id }));
@@ -193,8 +202,8 @@ it.each(["stale", "foreign", "truncated"])("re-reads %s callback task state whil
   const directory = await mkdtemp(path.join(os.tmpdir(), "hire-completion-")); directories.push(directory);
   const execution = hireDelegateReuse(context, { async own(row: Row) { owned.push(row); } } as unknown as TargetSession, campaignId, evidence,
     { deadlineAt: Date.now() + 10_000, directory, capture: async () => {} });
-  if (snapshot === "foreign") {
-    await expect(execution).rejects.toMatchObject({ code: "hire_resource_scope_mismatch" });
+  if (["foreign", "wrong-author"].includes(snapshot)) {
+    await expect(execution).rejects.toMatchObject({ code: snapshot === "foreign" ? "hire_resource_scope_mismatch" : "hire_completion_reply_mismatch" });
     expect(sendChatMessage).toHaveBeenCalledTimes(2);
     return;
   }

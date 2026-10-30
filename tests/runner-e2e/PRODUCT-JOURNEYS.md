@@ -49,7 +49,10 @@ document revision authored by that run. The lead uses three requested turns and
 two separate server completion callbacks,
 for seven work runs in total. Each callback must identify exactly one of the two
 completed child tasks with a distinct server delivery receipt; arbitrary extra
-lead turns fail. The journey waits for each callback before the next user turn.
+lead turns fail. The journey waits for each callback and its exact run-authored
+saved reply before the next user turn. A terminal run can precede its final
+comment; missing materialization polls within the existing deadline, while a
+wrong author or binding fails immediately.
 Setup probes and unpriced usage remain separate accounting
 uncertainties. The journey does not change company hiring policy or instance
 features. The provider must own and clean up the hired agent, both child tasks,

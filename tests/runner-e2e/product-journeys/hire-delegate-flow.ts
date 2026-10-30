@@ -108,17 +108,19 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
     const runs = [...leadRuns, ...(await Promise.all(owned.tasks.map(task => readRuns(task.id)))).flat()];
     const comments = await readObserved<Row[]>(`/api/issues/${chat.id}/comments?order=asc`);
     const requestIds = comments.filter(row => row.authorUserId === context.user.id).map(row => row.id);
-    assertHireRuns(scope, hiredId, owned.tasks, runs, undefined, requestIds, comments);
+    const completionRepliesReady = assertHireRuns(scope, hiredId, owned.tasks, runs, undefined, requestIds, comments);
     await retain("hire-delegate-observation.json", { scope: { ...scope, connectionBinding: undefined }, chat, project,
       agents: owned.agents.map(row => ({ id: row.id, name: row.name, reportsTo: row.reportsTo })), tasks: owned.tasks,
       runs: runs.map(run => ({ id: run.id, issueId: hireRunIssueId(run), agentId: run.agentId, status: run.status })) });
-    return { chat, ...owned, runs, requestIds, comments, allAgents: [lead as Agent, ...agents], activity };
+    return { chat, ...owned, runs, requestIds, comments, completionRepliesReady, allAgents: [lead as Agent, ...agents], activity };
   };
   const waitForIdle = async (count: number) => {
+    let awaitingReply = false;
     while (Date.now() < options.deadlineAt) {
       try {
         const state = await observe();
-        if (state && state.runs.length === count && state.runs.every(run => run.status === "succeeded")
+        awaitingReply = state?.completionRepliesReady === false;
+        if (state && state.completionRepliesReady && state.runs.length === count && state.runs.every(run => run.status === "succeeded")
           && state.chat.status === "in_review" && state.chat.conversationState === "waiting") {
           assertHireRuns(scope!, hiredId, state.tasks, state.runs, count, state.requestIds, state.comments);
           return state;
@@ -128,7 +130,7 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
       }
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
-    throw new JourneyError("failed", "hire_chat_not_completed");
+    throw new JourneyError("failed", awaitingReply ? "hire_completion_reply_missing" : "hire_chat_not_completed");
   };
   const turn = async (text: string, count: number) => {
     await page.goto(chatUrl, { waitUntil: "domcontentloaded" });
