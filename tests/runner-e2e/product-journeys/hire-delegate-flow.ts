@@ -111,7 +111,7 @@ export async function hireDelegateReuse(context: JourneyContext, session: Target
     return document;
   };
   const firstOutput = await readOutput(first!, marker, state.runs);
-  const originalTask = mutableIssueSnapshot(first!);
+  const originalTask = mutableIssueSnapshot(await api.get<Task>(`/api/issues/${first!.id}`));
   check("checklist-authored-by-hired-run");
   await session.own({ kind: "issue", name: names.review, journeyId: "hire-delegate-reuse" });
   state = await turn(`Have the existing ${names.hire} review the checklist on ${first!.identifier} and write a separate saved review document with the line "Reference: REVIEW${marker}". Create exactly one task titled ${names.review} in ${names.project}, assigned to that same teammate. Include the actual checklist in the handoff. Preserve the original checklist and task. Link the completed review here. Do not hire another agent.`, 5);
