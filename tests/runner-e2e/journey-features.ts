@@ -20,7 +20,7 @@ function associate(suites: readonly string[], cases: Record<string, readonly str
 
 associate(["product-journeys"], { "task-create": ["tasks/create"], "ask-question": ["questions-and-approvals/questions"],
   "project-task-context": ["projects/lifecycle", "projects/task-context", "tasks/create"],
-  "task-properties": ["tasks/properties"], "task-search-filter": ["tasks/organize"], "cloud-onboarding": ["onboarding/first-task"],
+  "task-properties": ["tasks/properties"], "task-document-persistence": ["documents-artifacts/documents"], "task-search-filter": ["tasks/organize"], "cloud-onboarding": ["onboarding/first-task"],
   "hire-delegate-reuse": ["agents/hire", "documents-artifacts/documents"] });
 associate(["antigravity-agent-journey"], {
   "saved-subscription-two-turn": ["agents/hire", "agents/instructions", "runs-adapters/validation", "runs-adapters/session",

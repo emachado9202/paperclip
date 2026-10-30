@@ -16,7 +16,7 @@ import { WorkspaceRetryControl } from "../components/WorkspaceRetryButton";
 import { isLockedIssueStub, LockedIssueChip } from "@/components/LockedIssueChip";
 import { canManageIssuePrivacy } from "../lib/issuePrivacy";
 import { TextAttachmentContext } from "../context/TextAttachmentContext";
-import { useTaskPluginPanels, taskPluginPanelId } from "@/hooks/useTaskPluginPanels";
+import { useTaskPluginPanels, taskPluginPanelActivationKey } from "@/hooks/useTaskPluginPanels";
 import { useTaskBrowsers, useBrowserArrivals } from "@/hooks/useTaskBrowsers";
 import { WorkspaceExportRecovery } from "../components/WorkspaceExportRecovery";
 import { DispositionRecoveryProvider } from "../components/DispositionRecoveryNotice";
@@ -384,6 +384,7 @@ import {
   type IssueRecentComments,
   type IssueDocumentSummary,
   type IssueWorkProduct,
+  type Project,
   type IssueWorkMode,
   type IssueThreadInteraction,
   type RequestCheckboxConfirmationInteraction,
@@ -402,6 +403,7 @@ import {
 // (loading/idle), which destabilizes downstream memos and panel keys that
 // depend on it. Reusing one shared reference keeps those values stable.
 const EMPTY_ISSUES: Issue[] = [];
+const EMPTY_PROJECTS: Project[] = [];
 
 type StopAndFinalizeRunError = Error & {
   runCancelledBeforeStatusUpdateFailed?: boolean;
@@ -3738,7 +3740,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
   });
   // Bounded pool of recently-updated issues to back the `@task` reference picker.
   // The picker filters this list client-side by identifier/title.
-  const { data: mentionIssues = [] } = useQuery({
+  const { data: mentionIssues = EMPTY_ISSUES } = useQuery({
     queryKey: resolvedCompanyId
       ? queryKeys.issues.mentionPool(resolvedCompanyId)
       : ["issues", "mention-pool", "pending"],
@@ -3760,7 +3762,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     queryFn: () => authApi.getSession(),
   });
 
-  const { data: projects } = useQuery({
+  const { data: projects = EMPTY_PROJECTS } = useQuery({
     queryKey: queryKeys.projects.list(selectedCompanyId!),
     queryFn: () => projectsApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId,
@@ -3812,7 +3814,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
   const fileViewerEnabled =
     instanceExperimentalSettings?.enableExperimentalFileViewer === true;
   const { orderedProjects } = useProjectOrder({
-    projects: projects ?? [],
+    projects,
     companyId: selectedCompanyId,
     userId: currentUserId,
   });
@@ -3977,7 +3979,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
           issueLinkState={resolvedIssueDetailState ?? location.state}
           subtasks={childIssues}
           createdTasks={createdTasks}
-          projects={projects ?? []}
+          projects={projects}
           isLoading={createdTasksQuery.isLoading || childIssuesLoading}
           hasError={hasError}
           onRetry={() => {
@@ -4094,19 +4096,22 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     const timeout = window.setTimeout(() => observer.disconnect(), 10_000);
     return () => { observer.disconnect(); window.clearTimeout(timeout); };
   }, [coordinatorWorkspaceEnabled, issue?.id, location.hash, location.key]);
-  const pluginPanels = useTaskPluginPanels(issue, taskChatShellEnabled);
+  const taskPanelAccountScope = coordinatorWorkspaceEnabled ? `coordinator:${currentUserId ?? "anonymous"}` : currentUserId ?? "anonymous";
+  const { panels: pluginPanels, isLoading: pluginPanelsLoading } = useTaskPluginPanels(issue, taskChatShellEnabled);
   const revealedPluginPanels = useRef(new Set<string>());
   const openedPluginPanelKeys = useRef(new Set<string>());
   const dismissedPluginPanelKeys = useRef(new Set<string>());
   useEffect(() => {
     for (const panel of pluginPanels) {
-      const key = JSON.stringify([currentUserId, issue?.id, panel.runId, taskPluginPanelId(panel)]);
+      if (!panel.autoOpen || !panel.runId) continue;
+      const key = taskPluginPanelActivationKey(panel, taskPanelAccountScope, issue!);
       if (revealedPluginPanels.current.has(key)) continue;
       revealedPluginPanels.current.add(key);
+      if (dismissedPluginPanelKeys.current.has(key)) continue;
       openTaskSidePanel();
       if (isMobile) setMobilePropsOpen(true);
     }
-  }, [pluginPanels, currentUserId, issue?.id, openTaskSidePanel, isMobile]);
+  }, [pluginPanels, taskPanelAccountScope, issue?.companyId, issue?.id, openTaskSidePanel, isMobile]);
   const browserQuery = useTaskBrowsers(issue?.id);
   const { openBrowserId, openBrowser: setOpenBrowserId, acknowledgeBrowserOpened: handleBrowserOpened } =
     useBrowserArrivals(currentUserId ?? "anonymous", issue?.id, browserQuery.data);
@@ -6192,6 +6197,25 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     [openIssueGallery],
   );
 
+  const taskDocumentEditor = useMemo<NonNullable<TaskSidePanelProps["documentEditor"]>>(() => ({
+    feedbackVotes,
+    feedbackDataSharingPreference,
+    feedbackTermsUrl: FEEDBACK_TERMS_URL,
+    mentions: mentionOptions,
+    externalReferences: externalObjectsState.isEnabled ? externalObjectsState.markdownReferences : undefined,
+    imageUploadHandler: async (file) => (await uploadAttachment.mutateAsync(file)).contentPath,
+    onVote: async (revisionId, vote, options) => {
+      await feedbackVoteMutation.mutateAsync({
+        targetType: "issue_document_revision", targetId: revisionId, vote,
+        reason: options?.reason, allowSharing: options?.allowSharing,
+        sharingPreferenceAtSubmit: feedbackDataSharingPreference,
+      });
+    },
+    agentMap,
+    userProfileMap,
+  }), [feedbackVotes, feedbackDataSharingPreference, mentionOptions, externalObjectsState.isEnabled,
+    externalObjectsState.markdownReferences, uploadAttachment.mutateAsync, feedbackVoteMutation.mutateAsync, agentMap, userProfileMap]);
+
   useLayoutEffect(() => {
     if (!panelIssue || suppressPanelUntilPlan || (conversation && !conversation.issue) || (taskChatShellEnabled && isMobile)) {
       closePanel();
@@ -6232,14 +6256,16 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
       openPanel(
         <IssueGalleryContext.Provider value={openIssueGallery}>
           <TaskSidePanel
+            documentEditor={taskDocumentEditor}
             pluginPanels={pluginPanels}
+            pluginPanelsLoading={pluginPanelsLoading}
             openedPluginPanelKeys={openedPluginPanelKeys.current}
             dismissedPluginPanelKeys={dismissedPluginPanelKeys.current}
             openBrowserId={openBrowserId}
             onBrowserOpened={handleBrowserOpened}
             key={panelIssue.id}
             {...sharedProps}
-            accountScope={coordinatorWorkspaceEnabled ? `coordinator:${currentUserId ?? "anonymous"}` : currentUserId ?? "anonymous"}
+            accountScope={taskPanelAccountScope}
             fileTabsEnabled={fileViewerEnabled}
             streamlinedTabs={streamlinedTaskDetailEnabled}
             showSubtasksTab={streamlinedTaskDetailEnabled}
@@ -6261,6 +6287,8 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     return () => closePanel();
   }, [
     pluginPanels,
+    pluginPanelsLoading,
+    taskPanelAccountScope,
     openBrowserId,
     handleBrowserOpened,
     closePanel,
@@ -6288,6 +6316,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     externalObjectsState.refetch,
     documentDeepLink,
     taskChatShellEnabled,
+    taskDocumentEditor,
     currentUserId,
     coordinatorWorkspaceEnabled,
     fileViewerEnabled,
@@ -8222,35 +8251,11 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
           pane (Artifacts tab) — the center column belongs to the thread. */}
           {taskChatShellEnabled ? null : (
             <IssueDocumentsSection
+              {...taskDocumentEditor}
               issue={issue}
               canDeleteDocuments={Boolean(session?.user?.id)}
               canManageDocumentLocks={Boolean(session?.user?.id)}
-              feedbackVotes={feedbackVotes}
-              feedbackDataSharingPreference={feedbackDataSharingPreference}
-              feedbackTermsUrl={FEEDBACK_TERMS_URL}
-              mentions={mentionOptions}
-              externalReferences={
-                externalObjectsState.isEnabled
-                  ? externalObjectsState.markdownReferences
-                  : undefined
-              }
-              imageUploadHandler={async (file) => {
-                const attachment = await uploadAttachment.mutateAsync(file);
-                return attachment.contentPath;
-              }}
-              onVote={async (revisionId, vote, options) => {
-                await feedbackVoteMutation.mutateAsync({
-                  targetType: "issue_document_revision",
-                  targetId: revisionId,
-                  vote,
-                  reason: options?.reason,
-                  allowSharing: options?.allowSharing,
-                  sharingPreferenceAtSubmit: feedbackDataSharingPreference,
-                });
-              }}
               extraActions={!hasAttachments ? attachmentUploadButton : null}
-              agentMap={agentMap}
-              userProfileMap={userProfileMap}
             />
           )}
 
@@ -8854,14 +8859,16 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                     <SheetTitle>Task side panel</SheetTitle>
                   </SheetHeader>
                   <TaskSidePanel
+                    documentEditor={taskDocumentEditor}
                     pluginPanels={pluginPanels}
+                    pluginPanelsLoading={pluginPanelsLoading}
                     openedPluginPanelKeys={openedPluginPanelKeys.current}
                     dismissedPluginPanelKeys={dismissedPluginPanelKeys.current}
                     openBrowserId={openBrowserId}
                     onBrowserOpened={handleBrowserOpened}
                     key={`${issue.id}:mobile`}
                     issue={issue}
-                    accountScope={coordinatorWorkspaceEnabled ? `coordinator:${currentUserId ?? "anonymous"}` : currentUserId ?? "anonymous"}
+                    accountScope={taskPanelAccountScope}
                     childIssues={childIssues}
                     issueLinkState={
                       streamlinedTaskDetailEnabled
